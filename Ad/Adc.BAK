@@ -1,0 +1,848 @@
+/*
+ *******************************************************************************
+ *	File name	:	Adc.c
+ *
+ *	[内容]
+ *		A/Dコンバータ処理
+ *------------------------------------------------------------------------------
+ *	[変更日]		[変更者]		[概要]
+ *	2017.11.10		Softex N.I		新規作成
+ *******************************************************************************
+ */
+#include "cpu_sfr.h"					/* SFR定義ヘッダー */
+
+#include "typedef.h"					/* データ型定義 */
+#include "UserMacro.h"					/* ユーザー作成マクロ定義 */
+#include "immediate.h"					/* immediate定数定義 */
+#include "switch.h"						/* コンパイルスイッチ定義 */
+#include "enum.h"						/* 列挙型の定義 */
+#include "struct.h"						/* 構造体定義 */
+#include "func.h"						/* 関数の外部参照(extern)定義 */
+#include "glLabel.h"					/* グローバル変数・定数(const)ラベル定義 */
+#include <string.h>
+#include "RF_Immediate.h"
+
+/*
+ *==============================================================================
+ *	define定義
+ *==============================================================================
+ */
+#define	imDryAdConvTOTm	9200U							/* 電池AD変換タイムアウトタイマ(500μs) */
+#define	imRetryCntMax	2U								/* 電池AD最大リトライ回数 */
+#define imBatLowTime_1min	60U						/* 低電圧時間：60秒(1分) */
+
+
+/*
+ *==============================================================================
+ *	列挙型定義
+ *==============================================================================
+ */
+#if 0
+typedef enum ET_AdcPhase
+{
+	ecAdcPhase_Init = 0,
+	ecAdcPhase_CtlWait,
+	ecAdcPhase_AdExe,
+
+	ecAdcPhaseMax
+} ET_AdcPhase_t;
+#endif
+
+/*
+ *==============================================================================
+ *	構造体定義
+ *==============================================================================
+ */
+#if 0
+/* A/Dコンバータ処理パラメータ */
+typedef struct ST_AdcPrm
+{
+//	uint16_t		mDryBattAdCnt;			/* 電池用A/Dカウント値 */
+	uint16_t		mRetryCnt;				/* 電池用ADリトライ回数 */
+//	ET_AdcPhase_t	mPhase;					/* AD動作のステータス */
+//	ET_BattSts_t	mBattSts;				/* 電池ステータス */
+} ST_AdcPrm_t;
+#endif
+
+/*
+ *==============================================================================
+ *	変数定義
+ *==============================================================================
+ */
+
+/* A/Dコンバータ処理パラメータ */
+//static ST_AdcPrm_t	vAdcPrm = { 0U, ecAdcPhase_Init };
+static uint16_t vOldAllTime;								/* 低電圧発生時の秒数(分＋秒) */
+
+
+/*
+ *==============================================================================
+ *	定数定義
+ *==============================================================================
+ */
+/* 電池種類と残量AD閾値:0番目から「空、低、中、高」の順 */
+//const uint16_t cRmnBt_Alk[ 4U ] = { 198U, 218U, 240U, 241U };		/* アルカリ電池 */
+const uint16_t cRmnBt_Alk[ 4U ] = { 198U, 240U, 261U, 262U };		/* アルカリ電池 */
+const uint16_t cRmnBt_NiHM[ 4U ] = { 251U, 259U, 272U, 273U };		/* ニッケル水素電池 */
+const uint16_t cRmnBt_Large[ 4U ] = { 192U, 225U, 235U, 236U };		/* 大容量バッテリ */
+
+
+/*
+ *==============================================================================
+ *	プロトタイプ宣言
+ *==============================================================================
+ */
+static void SubAdc_BattStsSet( void );
+static void SubAdc_BattStsNon( void );
+static void SubAdc_BattStsEmpty( void );
+static void SubAdc_BattStsL( void );
+static void SubAdc_BattStsM( void );
+static void SubAdc_BattStsH( void );
+
+//static void SubAdc_BatOn( void );
+//static void SubAdc_BatOff( void );
+
+
+
+#pragma section text MY_APP2
+/*
+ *******************************************************************************
+ *	A/Dコンバータ処理 初期化処理
+ *
+ *	[内容]
+ *		A/Dコンバータ処理 初期化処理
+ *******************************************************************************
+ */
+void ApiAdc_Initial( void )
+{
+	gvBatAd.mDryBattAdCnt = 0U;
+	gvBatAd.mBattSts = ecBattSts_Init;
+	gvBatAd.mPhase = ecAdcPhase_Init;
+	
+	R_PORT_BattCtrlOnOff( imOFF );				/* 乾電池用A/Dコントロール用ポートOFF */
+}
+
+
+/*
+ *******************************************************************************
+ *	A/Dコンバータ処理 メイン処理
+ *
+ *	[内容]
+ *		A/Dコンバータ処理 メイン処理
+  *	[引数]
+ *		uint8_t	arSel：0…起動直後のAD、0以外…通常AD
+ *******************************************************************************
+ */
+void ApiAdc_Main( uint8_t arSel )
+{
+	uint16_t	wkLoop;
+	uint16_t	wkData;
+	
+	switch( gvBatAd.mPhase )
+	{
+		/* 初期状態 */
+		case ecAdcPhase_Init:
+			
+			R_PORT_BattCtrlOnOff( imON );								/* 乾電池用A/Dコントロール用ポートON */
+			R_TAU0_Channel4_Start();									/* タイマチャネル4開始 */
+			gvBatAd.mPhase = ecAdcPhase_CtlWait;
+			break;
+			
+		/* AD実行中 */
+		case ecAdcPhase_AdExe:
+			
+			for( wkLoop = 0U; wkLoop <= imDryAdConvTOTm; wkLoop++ )
+			{
+				if( gvAdConvFinFlg == imON )							/* 変換完了の場合 */
+				{
+					R_ADC_Stop();										/* A/D変換停止 */
+					R_ADC_Get_Result( &wkData );						/* 乾電池用A/Dカウント値設定 */
+					gvBatAd.mDryBattAdCnt = wkData;
+					
+#if (swAdCntLog == imEnable)
+					if( gvAdCnt_RfFlg == imON )
+					{
+						gvAdCnt_RfFlg = imOFF;
+						gvMeasPrm.mMeasVal[ 0U ] = gvBatAd.mDryBattAdCnt;
+					}
+#endif
+					/* 起動直後ADは電池ステータス算出しない */
+					if( arSel != 0U )
+					{
+						SubAdc_BattStsSet();							/* 電池ステータスセット */
+					}
+					break;
+				}
+				else													/* 変換未完了の場合 */
+				{
+					if( wkLoop == imDryAdConvTOTm )						/* 変換未完了が500μs経過した場合、タイムアウト */
+					{
+						R_ADC_Stop();									/* A/D変換停止 */
+						if( gvBatAd.mRetryCnt == imRetryCntMax )		/* リトライ回数が最大リトライ回数を超えた場合 */
+						{
+							break;
+						}
+						else
+						{
+							gvBatAd.mRetryCnt++;						/* リトライ回数更新 */
+							wkLoop = 0U;								/* 変換未完了タイマクリア */
+							
+							R_ADC_Start();								/* A/D変換開始 */
+						}
+					}
+				}
+			}
+			
+			R_ADC_Set_OperationOff();									/* A/D変換待機解除 */
+			R_PORT_BattCtrlOnOff(imOFF);								/* 乾電池用A/Dコントロール用ポートOFF */
+			
+			gvModuleSts.mBat = ecBatModuleSts_Sleep;
+			gvBatAd.mPhase = ecAdcPhase_Init;
+			break;
+			
+		/* 乾電池A/D制御ポートONウェイト */
+		case ecAdcPhase_CtlWait:
+		default:
+			break;
+	}
+}
+
+
+/*
+ *******************************************************************************
+ * 電池のステータスセット
+ *
+ *	[内容]
+ *		電池のステータスをセットする。
+ *	[引数]
+ *		なし
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+static void SubAdc_BattStsSet( void )
+{
+	uint8_t		wkLoop;
+	uint16_t	wkRmnBt[ 4U ];				/* 残量AD閾値 */
+	sint16_t	wkS16;
+	sint32_t	wkS32;
+	
+	static uint8_t	vLow3AdTimes;			/* Lo割込のチャタリング判定 */
+	static uint8_t	vLow10AdTimes;
+	static uint16_t	vLowIntBattAdCnt;		/* Lo割込直後A/Dカウント値 */
+	
+	
+	switch( gvBatt_Int )
+	{
+		/* 低電圧LoでFlashライト直前 */
+		case ecBattInt_LowFlashWr:
+			
+			/* 1.6V未満：電池なし */
+			if( gvBatAd.mDryBattAdCnt < imAdCnt_1600mV )
+			{
+				SubAdc_BattStsNon();									/* 電池なし */
+			}
+			else
+			{
+				SubAdc_BattStsEmpty();									/* 電池残量:0本 */
+			}
+			gvBatt_Int = ecBattInt_Init;
+			
+			R_INTC5_Start();											/* 低電圧割込許可 */
+			break;
+			
+		/* 低電圧割込発生 */
+		case ecBattInt_Low:
+			
+			/* 無線停止 */
+			if( gvrfStsEventFlag.mPowerInt != BATT_POWER_OFF )
+			{
+				ApiRfDrv_BattOffInt();									/* 無線停止 */
+				gvrfStsEventFlag.mPowerInt = BATT_POWER_OFF;			/* 無線処理の後にフラグセット */
+				gvrfStsEventFlag.mReset = RFIC_INI;						/* 無線初期化、ICスリープ */
+			}
+			
+			vLowIntBattAdCnt = gvBatAd.mDryBattAdCnt;					/* Lo割込直後のADをメモリ */
+			
+			gvBatt_Int = ecBattInt_LowLoop;
+			vLow3AdTimes = 0U;
+			vLow10AdTimes = 0U;
+			
+			ApiTau0_GetTau0Ch0TimeClr();								/* 繰返しの乾電池AD測定(10msec後AD) */
+			R_TAU0_Channel0_Start();
+			break;
+			
+		/* 低電圧割込発生のAD繰返し */
+		case ecBattInt_LowLoop:
+			
+			gvBatt_Int = ecBattInt_Init;
+			
+			/* ADの最小値を採用 */
+			if( vLowIntBattAdCnt < gvBatAd.mDryBattAdCnt )
+			{
+				wkS16 = vLowIntBattAdCnt;
+			}
+			else
+			{
+				wkS16 = gvBatAd.mDryBattAdCnt;
+			}
+			
+			
+			/* 今回のADが1.6V未満：チャタリング判定(Lo10回) */
+			if( gvBatAd.mDryBattAdCnt < imAdCnt_1600mV )
+			{
+				vLow10AdTimes ++;
+				if( vLow10AdTimes < 10U )
+				{
+					gvBatt_Int = ecBattInt_LowLoop;
+					
+					ApiTau0_GetTau0Ch0TimeClr();						/* 繰返しの乾電池AD測定(10msec後AD) */
+					R_TAU0_Channel0_Start();
+				}
+				else
+				{
+					SubAdc_BattStsEmpty();								/* 電池残量:0本 */
+					
+					R_INTC5_Start();									/* 低電圧割込許可 */
+				}
+				
+			}
+			/* 前回のAD最大値が1.6V未満かつ今回のADが1.82V以上 or 最小値が1.82V以上 */
+			else if( ((vLowIntBattAdCnt < imAdCnt_1600mV) && (gvBatAd.mDryBattAdCnt >= imAdCnt_1820mV)) ||
+						(wkS16 >= imAdCnt_1820mV) )
+			{
+				/* 割込ポートHi */
+				if( M_TSTBIT(P0, M_BIT1) )
+				{
+					/* 電池電圧(空)復帰 */
+					ApiAbn_AbnStsClr( imAbnSts_BatEmpty, ecAbnInfKind_AbnSts );
+					
+					gvrfStsEventFlag.mPowerInt = BATT_POWER_ON;			/* 無線機能復帰 */
+					
+					R_INTC5_Start();									/* 低電圧割込許可 */
+				}
+				/* 割込ポートLo */
+				else
+				{
+					vLow3AdTimes ++;
+					if( vLow3AdTimes < 3U )
+					{
+						gvBatt_Int = ecBattInt_LowLoop;
+						
+						ApiTau0_GetTau0Ch0TimeClr();					/* 繰返しの乾電池AD測定(10msec後AD) */
+						R_TAU0_Channel0_Start();
+					}
+					else
+					{
+						SubAdc_BattStsEmpty();							/* 電池残量:0本 */
+						
+						R_INTC5_Start();								/* 低電圧割込許可 */
+					}
+				}
+			}
+			else
+			{
+				SubAdc_BattStsEmpty();									/* 電池残量:0本 */
+				
+				R_INTC5_Start();										/* 低電圧割込許可 */
+			}
+			if( vLowIntBattAdCnt < gvBatAd.mDryBattAdCnt )
+			{
+				vLowIntBattAdCnt = gvBatAd.mDryBattAdCnt;				/* 最大値はキープ */
+			}
+			break;
+			
+			
+		/* 電池復帰割込発生 */
+		case ecBattInt_High:
+		case ecBattInt_NonHigh:
+		/* 通常時 */
+		case ecBattInt_Init:
+		default:
+			
+			/* 電池種類と残量AD閾値の組合わせセット */
+			switch( gvInFlash.mParam.mBatType )
+			{
+				/* アルカリ電池 */
+				default:
+				case ecBatType_Alk:
+					memcpy( wkRmnBt, cRmnBt_Alk, sizeof(wkRmnBt) );
+					break;
+					
+				/* リチウム電池 */
+				case ecBatType_Li:
+					for( wkLoop = 0U ; wkLoop < 3U; wkLoop++ )
+					{
+						wkS32 = gvInTemp;
+						switch( wkLoop )
+						{
+							/* 電池残量:0本 (8616*T + 4439660)/16172 */
+							case 0U:
+								wkS32 = (wkS32 * 8616) + 4439660;
+								break;
+							/* 電池残量:1本 (9495*T + 4652412)/16172 */
+							case 1U:
+								wkS32 = (wkS32 * 9495) + 4652412;
+								break;
+							/* 電池残量:2本 (9671*T + 4812416)/16172 */
+							case 2U:
+								wkS32 = (wkS32 * 9671) + 4812416;
+								break;
+						}
+						wkS32 /= 16172;
+						
+						wkRmnBt[ wkLoop ] = (uint16_t)wkS32;
+					}
+					wkRmnBt[ 3U ] = wkRmnBt[ 2U ] + 1U;					/* 電池残量:高 */
+					break;
+					
+				/* ニッケル水素電池 */
+				case ecBatType_NiHM:
+					
+					if( gvInTemp >= 25 )
+					{
+						memcpy( wkRmnBt, cRmnBt_NiHM, sizeof(wkRmnBt) );
+					}
+					else
+					{
+						for( wkLoop = 0U ; wkLoop < 3U; wkLoop++ )
+						{
+							wkS32 = gvInTemp;
+							switch( wkLoop )
+							{
+								/* 電池残量:0本 (11253*T + 3769755)/16172 */
+								case 0U:
+									wkS32 = (wkS32 * 11253) + 3769755;
+									break;
+								/* 電池残量:1本 (10374*T + 3931517)/16172 */
+								case 1U:
+									wkS32 = (wkS32 * 10374) + 3931517;
+									break;
+								/* 電池残量:2本 (11253*T + 4121411)/16172 */
+								case 2U:
+									wkS32 = (wkS32 * 11253) + 4121411;
+									break;
+							}
+							wkS32 /= 16172;
+							
+							wkRmnBt[ wkLoop ] = (uint16_t)wkS32;
+						}
+						wkRmnBt[ 3U ] = wkRmnBt[ 2U ] + 1U;				/* 電池残量:高 */
+					}
+					break;
+					
+				/* 大容量バッテリ */
+				case ecBatType_Large:
+					memcpy( wkRmnBt, cRmnBt_Large, sizeof(wkRmnBt) );
+					break;
+			}
+			
+			
+			/* L→H割込発生 */
+			if( gvBatt_Int == ecBattInt_High )
+			{
+				gvBatt_Int = ecBattInt_Init;
+				
+				/* 低電圧割込許可 */
+				R_INTC5_Start();
+				
+				/* 2.3V未満 or 電池1本→0本の閾値以下 */
+				if( gvBatAd.mDryBattAdCnt < imAdCnt_2300mV || gvBatAd.mDryBattAdCnt <= wkRmnBt[ 0U ] )
+				{
+					SubAdc_BattStsEmpty();								/* 電池残量:0本 */
+					break;
+				}
+				/* 2.3V以上 and 電池1本→0本の閾値超過(電池1本)：電池復帰 */
+				else
+				{
+					/* 電池電圧(空)復帰 */
+					ApiAbn_AbnStsClr( imAbnSts_BatEmpty, ecAbnInfKind_AbnSts );
+					
+					/* 収録をRAMに記録中 */
+					if( gvBatLowSts == ecLowBatFlashSts_Now )
+					{
+//						SubAdc_BatOn();									/* 低電圧復帰 */
+						gvBatLowSts = ecLowBatFlashSts_Init;								/* 収録をRAMに記録からの復帰 */
+					}
+					gvrfStsEventFlag.mPowerInt = BATT_POWER_ON;			/* 無線機能復帰 */
+					
+					gvBatAd.mBattSts = ecBattSts_Non;
+					
+					/* 電池復帰につきbreakせず、以下の通常時の処理を実行 */
+				}
+			}
+			/* 電池なしからの電圧H割込発生 */
+			else if( gvBatt_Int == ecBattInt_NonHigh )
+			{
+				gvBatt_Int = ecBattInt_Init;
+				
+				/* 低電圧割込許可 */
+				R_INTC5_Start();
+				
+				/* 1.6V未満 */
+				if( gvBatAd.mDryBattAdCnt < imAdCnt_1600mV )
+				{
+					SubAdc_BattStsEmpty();										/* 電池残量:0本 */
+					break;
+				}
+				else
+				{
+					/* 収録をRAMに記録中 */
+					if( gvBatLowSts == ecLowBatFlashSts_Now )
+					{
+//						SubAdc_BatOn();											/* 低電圧復帰 */
+						gvBatLowSts = ecLowBatFlashSts_Init;					/* 収録をRAMに記録からの復帰 */
+					}
+					
+					/* 2.3V未満 */
+					if( gvBatAd.mDryBattAdCnt < imAdCnt_2300mV )
+					{
+						SubAdc_BattStsEmpty();									/* 電池残量:0本 */
+						break;
+					}
+					/* 2.3V以上 */
+					else
+					{
+						/* 電池電圧(空)復帰 */
+						ApiAbn_AbnStsClr( imAbnSts_BatEmpty, ecAbnInfKind_AbnSts );
+						
+						if( gvBatAd.mDryBattAdCnt > wkRmnBt[ 0U ] )
+						{
+							gvrfStsEventFlag.mPowerInt = BATT_POWER_ON;			/* 無線機能復帰 */
+						}
+						gvBatAd.mBattSts = ecBattSts_Non;
+						/* 電池復帰につきbreakせず、以下の通常時の処理を実行 */
+					}
+				}
+			}
+			
+			/* 電池残量:0本 */
+			if( gvBatAd.mDryBattAdCnt <= wkRmnBt[ 0U ] )
+			{
+				SubAdc_BattStsEmpty();									/* 電池残量:0本 */
+			}
+			/* 電池残量:1本 */
+			else if( gvBatAd.mDryBattAdCnt <= wkRmnBt[ 1U ] )
+			{
+				SubAdc_BattStsL();										/* 電池残量:1本 */
+			}
+			/* 電池残量:2本 */
+			else if( gvBatAd.mDryBattAdCnt <= wkRmnBt[ 2U ] )
+			{
+				SubAdc_BattStsM();										/* 電池残量:2本 */
+			}
+			/* 電池残量:3本 */
+			else
+			{
+				SubAdc_BattStsH();										/* 電池残量:3本 */
+			}
+			
+			/* 低電圧割込許可 */
+			R_INTC5_Start();
+			break;
+	}
+}
+
+#if 0
+/*
+ *******************************************************************************
+ *	A/Dカウント値取得
+ *
+ *	[内容]
+ *		A/Dカウント値を取得する。
+ *******************************************************************************
+ */
+uint16_t ApiAdc_AdCntGet( void )
+{
+	return gvBatAd.mDryBattAdCnt;
+}
+#endif
+
+#if 0
+/*
+ *******************************************************************************
+ *	A/Dスタート
+ *
+ *	[内容]
+ *		A/D実行フェーズにする。
+ *******************************************************************************
+ */
+void ApiAdc_AdStart( void )
+{
+	gvBatAd.mPhase = ecAdcPhase_AdExe;
+}
+#endif
+
+#if 0
+/*
+ *******************************************************************************
+ *	電池のステータス取得
+ *
+ *	[内容]
+ *		電池のステータスを取得する。
+ *******************************************************************************
+ */
+ET_BattSts_t	ApiAdc_BattStsGet( void )
+{
+	return gvBatAd.mBattSts;
+}
+#endif
+
+#if 0
+/*
+ *******************************************************************************
+ *	電池のステータスセット
+ *
+ *	[内容]
+ *		電池のステータスをセットする。
+ *******************************************************************************
+ */
+void ApiAdc_BattStsSet( ET_BattSts_t arSts )
+{
+	gvBatAd.mBattSts = arSts;
+}
+#endif
+
+/*
+ *******************************************************************************
+ *	電池なし
+ *
+ *	[内容]
+ *		電池なしにする
+ *******************************************************************************
+ */
+static void SubAdc_BattStsNon( void )
+{
+	gvBatAd.mBattSts = ecBattSts_Non;						/* 電池なし */
+	gvModuleSts.mLcd = ecLcdModuleSts_Run;					/* 画面更新 */
+	
+	/* 収録をRAMに記録中ではない */
+	if( gvBatLowSts != ecLowBatFlashSts_Now )
+	{
+//		SubAdc_BatOff();									/* 低電圧発生 */
+		ApiRtcDrv_InRtcToExRtc();											/* 内蔵RTCの時刻を外付けRTCに書込む */
+		
+		ApiInFlash_ParmWrite( ecInFlashWrSts_ParmNow, 0U );					/* 現時点の変数、収録アドレステーブルを内蔵Flashへライト */
+		
+		/* 電池電圧(空)発生 */
+		ApiAbn_AbnStsSet( imAbnSts_BatEmpty, ecAbnInfKind_AbnSts );
+		vOldAllTime = ( gvClock.mMin * 60U ) + gvClock.mSec;
+		
+		gvBatLowSts = ecLowBatFlashSts_Now;									/* 収録をRAMに記録中 */
+	}
+}
+
+/*
+ *******************************************************************************
+ *	電池残量0本
+ *
+ *	[内容]
+ *		電池残量0本にする
+ *******************************************************************************
+ */
+static void SubAdc_BattStsEmpty( void )
+{
+	if( gvBatAd.mBattSts <= ecBattSts_L )
+	{
+		gvBatAd.mBattSts = ecBattSts_Empty;			/* 電池残量：0本 */
+		gvModuleSts.mLcd = ecLcdModuleSts_Run;		/* 画面更新実行状態に移行 */
+		
+		/* 電池電圧(空)発生 */
+		ApiAbn_AbnStsSet( imAbnSts_BatEmpty, ecAbnInfKind_AbnSts );
+	}
+
+/* 工程モード時、入らないようにする */
+#if (swKouteiMode == imDisable)
+	/* 割込みに入らず残量0となったとき */
+	if( gvrfStsEventFlag.mPowerInt != BATT_POWER_OFF )
+	{
+		ApiRfDrv_BattOffInt();								/* 無線停止 */
+		gvrfStsEventFlag.mPowerInt = BATT_POWER_OFF;		/* 無線処理の後にフラグセット */
+		gvrfStsEventFlag.mReset = RFIC_INI;					/* 無線初期化、ICスリープ */
+	}
+#endif
+}
+
+/*
+ *******************************************************************************
+ *	電池残量1本
+ *
+ *	[内容]
+ *		電池残量1本にする
+ *******************************************************************************
+ */
+static void SubAdc_BattStsL( void )
+{
+	if( (gvBatAd.mBattSts <= ecBattSts_M) ||
+		(gvBatAd.mBattSts == ecBattSts_Non) )
+	{
+		gvBatAd.mBattSts = ecBattSts_L;
+		gvModuleSts.mLcd = ecLcdModuleSts_Run;				/* 画面更新実行状態に移行 */
+		
+		/* 電池電圧低下発生 */
+		ApiAbn_AbnStsSet( imAbnSts_BatLow, ecAbnInfKind_AbnSts );
+	}
+}
+
+/*
+ *******************************************************************************
+ *	電池残量2本
+ *
+ *	[内容]
+ *		電池残量2本にする
+ *******************************************************************************
+ */
+static void SubAdc_BattStsM( void )
+{
+	if( (gvBatAd.mBattSts <= ecBattSts_H) ||
+		(gvBatAd.mBattSts == ecBattSts_Non) )
+	{
+		gvBatAd.mBattSts = ecBattSts_M;
+		gvModuleSts.mLcd = ecLcdModuleSts_Run;				/* 画面更新実行状態に移行 */
+		
+		/* 電池電圧低下復帰 */
+		ApiAbn_AbnStsClr( imAbnSts_BatLow, ecAbnInfKind_AbnSts );
+	}
+}
+
+/*
+ *******************************************************************************
+ *	電池残量3本
+ *
+ *	[内容]
+ *		電池残量3本にする
+ *******************************************************************************
+ */
+static void SubAdc_BattStsH( void )
+{
+	if( (gvBatAd.mBattSts == ecBattSts_Init) ||
+		(gvBatAd.mBattSts == ecBattSts_Non) )
+	{
+		gvBatAd.mBattSts = ecBattSts_H;
+		gvModuleSts.mLcd = ecLcdModuleSts_Run;				/* 画面更新実行状態に移行 */
+		
+		/* 電池電圧低下復帰 */
+		ApiAbn_AbnStsClr( imAbnSts_BatLow, ecAbnInfKind_AbnSts );
+	}
+}
+
+
+/*
+ *******************************************************************************
+ *	電池AD開始
+ *
+ *	[内容]
+ *		無線通信時のAD、5min毎のADによる電池ADを開始する
+ *******************************************************************************
+ */
+void ApiAdc_AdExe( void )
+{
+	
+	if( (gvBatt_Int == ecBattInt_Init) &&				/* AD通常動作(電池電圧割込、Flash書込み直前のAD実行中でない) */
+		(gvBatAd.mPhase == ecAdcPhase_Init) )			/* AD処理初期状態(AD実行中でない) */
+	{
+//		gvModuleSts.mBat = ecBatModuleSts_Run;		/* 乾電池AD測定 */
+	}
+}
+
+#if 0
+/*
+ *******************************************************************************
+ *	低電圧からの復帰
+ *
+ *	[内容]
+ *		電池復帰による低電圧状態からの復帰
+ *******************************************************************************
+ */
+static void SubAdc_BatOn( void )
+{
+	/* 電池電圧(空)復帰 */
+	ApiAbn_AbnStsClr( imAbnSts_BatEmpty, ecAbnInfKind_AbnSts );
+	
+	gvBatLowSts = ecLowBatFlashSts_Init;								/* 収録をRAMに記録からの復帰 */
+}
+
+
+/*
+ *******************************************************************************
+ *	低電圧発生
+ *
+ *	[内容]
+ *		電池低下による定電圧発生
+ *******************************************************************************
+ */
+static void SubAdc_BatOff( void )
+{
+	ApiRtcDrv_InRtcToExRtc();											/* 内蔵RTCの時刻を外付けRTCに書込む */
+	
+	ApiInFlash_ParmWrite( ecInFlashWrSts_ParmNow, 0U );					/* 現時点の変数、収録アドレステーブルを内蔵Flashへライト */
+	
+	/* 電池電圧(空)発生 */
+	ApiAbn_AbnStsSet( imAbnSts_BatEmpty, ecAbnInfKind_AbnSts );
+	vOldAllTime = ( gvClock.mMin * 60U ) + gvClock.mSec;
+	
+	gvBatLowSts = ecLowBatFlashSts_Now;									/* 収録をRAMに記録中 */
+}
+#endif
+/*
+ *******************************************************************************
+ *	低電圧時の動作停止判定処理
+ *
+ *	[内容]
+ *		低電圧中の場合、1分間の計測を行う。経過時は画面の消灯を行う。
+ *		また、低電圧用のキューがフル状態となった場合にも画面の消灯を行う。
+ *******************************************************************************
+ */
+void ApiAdc_LowStopMotionJdg( void )
+{
+	uint16_t	wkDiff;
+	ET_Error_t	wkRet;
+	
+	/* 全秒に変換 */
+	wkDiff = ((gvClock.mMin * 60U) + gvClock.mSec) - vOldAllTime;
+	
+	/* 低電圧用キューに空きがあるか取得 */
+	wkRet = ApiFlash_GetEmptyQueueJdg();
+	
+	
+	/* H電圧 & 低電圧割込み許可 */
+	if( M_TSTBIT(P0, M_BIT1) && PMK5 == 0U )
+	{
+		R_INTC5_Stop();											/* 低電圧割込禁止 */
+		gvBatt_Int = ecBattInt_High;							/* 電池電圧High検出割込み発生 */
+		
+		/* 電池投入時、電池マーク消灯 */
+		if( gvBatAd.mBattSts == ecBattSts_Non || gvBatAd.mBattSts == ecBattSts_Empty )
+		{
+			gvBatAd.mBattSts = ecBattSts_Init;
+			gvModuleSts.mLcd = ecLcdModuleSts_Run;				/* 画面更新 */
+		}
+		
+		ApiTau0_GetTau0Ch0TimeClr();							/* 乾電池AD測定(3secWait後) */
+		R_TAU0_Channel0_Start();
+		
+	}
+	
+	
+	/* 低電圧発生時間と比較 */
+	if( (wkDiff >= imBatLowTime_1min) ||						/* 60秒経過した場合 */
+		(wkRet == ecERR_NG) )									/* 低電圧用のキューに空きがない場合 */
+	{
+		/* 全消灯処理 */
+		ApiLcd_LcdStop();										/* LCDドライバ停止処理 */
+		
+		R_INTC5_Start();
+		while( 1U )
+		{
+			/* 電池投入割込発生 */
+			if( gvBatt_Int == ecBattInt_NonHigh || gvBatt_Int == ecBattInt_High )
+			{
+				break;
+			}
+			M_HALT;
+		}
+		WDTE = 0xFFU;											/* 強制リセット */
+	}
+}
+
+#pragma section

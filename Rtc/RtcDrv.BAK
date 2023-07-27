@@ -1,0 +1,1344 @@
+/*
+ *******************************************************************************
+ *	File name	:	RtcDrv.c
+ *
+ *	[内容]
+ *		RTCドライバー
+ *		SIIセミコンダクタ製 S-35390A
+ *------------------------------------------------------------------------------
+ *	[変更日]		[変更者]		[概要]
+ *	2017.12.21		Softex H.M		新規作成
+ *******************************************************************************
+ */
+#include "cpu_sfr.h"															/* SFR定義ヘッダー */
+
+#include "typedef.h"															/* データ型定義 */
+#include "UserMacro.h"															/* ユーザ作成マクロ定義 */
+#include "immediate.h"															/* immediate定数定義 */
+#include "switch.h"																/* コンパイルスイッチ定義 */
+#include "glLabel.h"															/* グローバル変数・定数(const)ラベル定義 */
+#include "enum.h"																/* 列挙型の定義 */
+#include "struct.h"																/* 構造体定義 */
+#include "func.h"																/* 関数の外部参照(extern)定義 */
+
+
+/*
+ *==============================================================================
+ *	define定義
+ *==============================================================================
+ */
+#define		imRtcDrv_StsReg1ReadCmd		0x61U									/* ステータスレジスタ1読出しコマンド(0110 0001b) */
+#define		imRtcDrv_StsReg1WriteCmd	0x60U									/* ステータスレジスタ1書き込みコマンド(0110 0000b) */
+#define		imRtcDrv_StsReg1_POC		M_BIT0									/* ステータスレジスタ1 POCビット位置 */
+#define		imRtcDrv_StsReg1_BLD		M_BIT1									/* ステータスレジスタ1 BLDビット位置 */
+#define		imRtcDrv_StsReg1_12_24		M_BIT6									/* ステータスレジスタ1 ~12/24ビット位置 */
+#define		imRtcDrv_StsReg1_RESET		M_BIT7									/* ステータスレジスタ1 RESETビット位置 */
+
+#define		imRtcDrv_StsReg2ReadCmd		0x63U									/* ステータスレジスタ2読出しコマンド(0110 0011b) */
+#define		imRtcDrv_StsReg2WriteCmd	0x62U									/* ステータスレジスタ2書き込みコマンド(0110 0010b) */
+#define		imRtcDrv_Int2RegReadCmd		0x6BU									/* INT2レジスタ読出しコマンド(周波数設定出力)(0110 1011b) */
+#define		imRtcDrv_Int2RegWriteCmd	0x6AU									/* INT2レジスタ書き込みコマンド(周波数設定出力)(0110 1010b) */
+#define		imRtcDrv_StsReg2_INT2_ME	M_BIT2									/* ステータスレジスタ2 NT2端子出力モード選択 */
+#define		imRtcDrv_StsReg2_INT2_FE	M_BIT3									/* ステータスレジスタ2 NT2端子出力モード選択 */
+#define		imRtcDrv_Int2Reg_1Hz		M_BIT7									/* INT2レジスタ 1Hzビット位置 */
+
+
+#define		imRtcDrv_RealTime1ReadCmd	0x65U									/* リアルタイムデータ1読出しコマンド(0110 0101b) */
+#define		imRtcDrv_RealTime1WriteCmd	0x64U									/* リアルタイムデータ1書き込みコマンド(0110 0100b) */
+
+#define		imRtcDrv_RetryCnt			10U										/* リトライ回数 */
+#define		imErrJdgTimer				24000U									/* 1ms(1/24MHz=41.6667ns、1ms/41.667ns=24000) */
+
+#define		imInRtcJdgCnt				10U										/* 内蔵RTCアクセス最大回数 */
+#define		imExRtcJdgCnt				5U										/* 外付けRTCアクセス最大回数 */
+
+
+/*
+ *==============================================================================
+ *	列挙型定義
+ *==============================================================================
+ */
+
+
+/*
+ *==============================================================================
+ *	構造体定義
+ *==============================================================================
+ */
+/* RTCドライバー用パラメータ構造体 */
+typedef struct ST_RtcDrvPrm
+{
+	ET_RtcDrvInitSts_t	mInitSts;												/* 初期化ステータス */
+	uint8_t				mInitWaitCnt;											/* イニシャライズ待ちカウンタ(10ms/カウント) */
+} ST_RtcDrvPrm_t;
+
+
+/*
+ *==============================================================================
+ *	変数定義
+ *==============================================================================
+ */
+static ST_RtcDrvPrm_t	vRtcDrvPrm;												/* RTCドライバー用パラメータ */
+
+
+/*
+ *==============================================================================
+ *	定数定義
+ *==============================================================================
+ */
+/* 閏年の月ごとの日数 */
+const uint8_t cDayofLeapMonth[ 13U ] =
+{
+	0U,						/* dummy */
+	31U,					/* 1月 */
+	29U,					/* 2月 */
+	31U,					/* 3月 */
+	30U,					/* 4月 */
+	31U,					/* 5月 */
+	30U,					/* 6月 */
+	31U,					/* 7月 */
+	31U,					/* 8月 */
+	30U,					/* 9月 */
+	31U,					/* 10月 */
+	30U,					/* 11月 */
+	31U						/* 12月 */
+};
+
+/* 平年の月ごとの日数 */
+const uint8_t cDayofMonth[ 13U ] = 
+{
+	0U,						/* dummy */
+	31U,					/* 1月 */
+	28U,					/* 2月 */
+	31U,					/* 3月 */
+	30U,					/* 4月 */
+	31U,					/* 5月 */
+	30U,					/* 6月 */
+	31U,					/* 7月 */
+	31U,					/* 8月 */
+	30U,					/* 9月 */
+	31U,					/* 10月 */
+	30U,					/* 11月 */
+	31U						/* 12月 */
+};
+
+/*
+ *==============================================================================
+ *	プロトタイプ宣言
+ *==============================================================================
+ */
+static void SubRtcDrv_RegInitial( void );
+static ET_Error_t SubRtcDrv_SetRtc( const ST_RTC_t *parRtc );
+static ET_Error_t SubRtcDrv_ReadRtc( void );
+static uint8_t SubRtcDrv_BinToBcd( uint8_t arBin );
+static uint8_t SubRtcDrv_BcdToBin( uint8_t arBcd );
+static uint32_t	SubRtcDrv_ReverseBit32( uint32_t arData );
+static void SubRtcDrv_InRtcErrSet( uint8_t arLoop );
+static ET_Error_t SubRtcDrv_FlgChk( uint8_t* gvFlg );
+//static ET_Error_t SubRtcDrv_RcvFlgChk( void );
+//static ET_Error_t SubRtcDrv_SndFlgChk( void );
+
+
+#pragma section text MY_APP2
+/*
+ *******************************************************************************
+ *	RTC(S-35390A) 初期化処理
+ *
+ *	[内容]
+ *		RTC(S-35390A)の初期化処理を行う。
+ *******************************************************************************
+ */
+void ApiRtcDrv_Initial( void )
+{
+	uint8_t		wkStsReg1;
+//	uint16_t	wkErrJdgCnt = 0U;												/* 異常判定カウンタ */
+	
+	R_RTC_Start();																/* 内蔵RTC起動 */
+	
+	vRtcDrvPrm.mInitWaitCnt = 0U;												/* イニシャライズ待ちカウンタ(10ms/カウント)初期化 */
+	
+	/* ステータスレジスタ1読出し */
+	gvIicRcvEndFlg = imOFF;														/* 送信完了フラグOFF */
+	R_IIC00_Master_Receive(imRtcDrv_StsReg1ReadCmd, &wkStsReg1, 1U);
+	
+	/* 送信完了フラグがONになるまで */
+//	while( gvIicRcvEndFlg == imOFF )
+//	{
+//		wkErrJdgCnt++;
+//		if( wkErrJdgCnt > imErrJdgTimer )										/* 1ms超過で外付けRTCへのアクセス失敗 */
+//		{
+			/* レジスタ初期化実行 */
+//			vRtcDrvPrm.mInitSts = ecRtcDrvInitSts_RegInit;						/* 初期化ステータス＝レジスタ初期化 */
+//			vRtcDrvPrm.mInitWaitCnt = 50U;										/* イニシャライズ待ちカウンタ＝500ms設定 */
+//			R_TAU0_Channel7_Custom( imTimer07_10msec );							/* 10msecWait */
+//			gvModuleSts.mRtc = ecRtcModuleSts_Wait;
+//			return;
+//		}
+//	}
+	if( ecERR_NG == SubRtcDrv_FlgChk( &gvIicRcvEndFlg ) )
+	{
+		/* レジスタ初期化実行 */
+		vRtcDrvPrm.mInitSts = ecRtcDrvInitSts_RegInit;						/* 初期化ステータス＝レジスタ初期化 */
+		vRtcDrvPrm.mInitWaitCnt = 50U;										/* イニシャライズ待ちカウンタ＝500ms設定 */
+		R_TAU0_Channel7_Custom( imTimer07_10msec );							/* 10msecWait */
+		gvModuleSts.mRtc = ecRtcModuleSts_Wait;
+		return;
+	}
+	
+	
+	/* POCビットが1 */
+	if( M_TSTBIT( wkStsReg1, imRtcDrv_StsReg1_POC ) )
+	{
+		/* レジスタ初期化実行 */
+		vRtcDrvPrm.mInitSts = ecRtcDrvInitSts_RegInit;							/* 初期化ステータス＝レジスタ初期化 */
+		vRtcDrvPrm.mInitWaitCnt = 50U;											/* イニシャライズ待ちカウンタ＝500ms設定 */
+		R_TAU0_Channel7_Custom( imTimer07_10msec );								/* 10msecWait */
+		gvModuleSts.mRtc = ecRtcModuleSts_Wait;
+	}
+	else
+	{
+		vRtcDrvPrm.mInitWaitCnt = 0U;											/* イニシャライズ待ちカウンタ(10ms/カウント)初期化 */
+		if( M_TSTBIT( wkStsReg1, imRtcDrv_StsReg1_BLD ) )						/* 電圧低下判定 */
+		{
+			vRtcDrvPrm.mInitSts = ecRtcDrvInitSts_RegInit;						/* 初期化ステータス＝レジスタ初期化 */
+			R_TAU0_Channel7_Custom( imTimer07_10msec );							/* 10msecWait */
+			gvModuleSts.mRtc = ecRtcModuleSts_Wait;
+		}
+		else
+		{
+			if( !M_TSTBIT( wkStsReg1, imRtcDrv_StsReg1_12_24 ) )				/* 時間:12/24 */
+			{
+				/* 何らかの理由で12/24が初期値になっている */
+				vRtcDrvPrm.mInitSts = ecRtcDrvInitSts_24Write;					/* 24時間管理へ設定 */
+				R_TAU0_Channel7_Custom( imTimer07_10msec );						/* 10msecWait */
+				gvModuleSts.mRtc = ecRtcModuleSts_Wait;
+			}
+			else
+			{
+				/* リアルタイムデータ読み出し */
+				vRtcDrvPrm.mInitSts = ecRtcDrvInitSts_RealRead;					/* 初期化ステータス＝リアルタイムデータ読み出し */
+				gvModuleSts.mRtc = ecRtcModuleSts_Run;
+			}
+		}
+	}
+	
+	/* 1Hz出力OFF */
+	/* デフォルト出力OFFなので削除 */
+//	ApiRtcDrv_1HzOut( imOFF );
+	
+	while( 1 )
+	{
+		if( gvModuleSts.mRtc == ecRtcModuleSts_Run )
+		{
+			/* RTC(S-35390A) レジスタ初期化 */
+			SubRtcDrv_RegInitial();
+			if( vRtcDrvPrm.mInitSts == ecRtcDrvInitSts_InitEnd )
+			{
+				gvModuleSts.mRtc = ecRtcModuleSts_Sleep;
+				break;
+			}
+		}
+	}
+}
+
+
+/*
+ *******************************************************************************
+ *	RTC(S-35390A) レジスタ初期化処理
+ *
+ *	[内容]
+ *		ステータスレジスタの初期化及び、リアルタイムデータの初期設定を行う。
+ *		レジスタ初期化設定が出来ない場合は、ecERR_NGを返す。
+ *	[実行タイミング]
+ *		10ms周期タスク
+ *******************************************************************************
+ */
+static void SubRtcDrv_RegInitial( void )
+{
+	uint8_t		wkStsReg1;
+	uint8_t		wkRetryCnt;														/* リトライ回数(＝値－1) */
+	ST_RTC_t	wkRTC;															/* RTCデータ */
+	ET_Error_t	wkRet = ecERR_OK;												/* 戻り値(エラー情報) */
+	
+	switch( vRtcDrvPrm.mInitSts )
+	{
+		/* レジスタ初期化 */
+		case ecRtcDrvInitSts_RegInit:
+			if( vRtcDrvPrm.mInitWaitCnt > 0U )									/* イニシャライズ待ちカウンタ判定 */
+			{
+				vRtcDrvPrm.mInitWaitCnt--;										/* イニシャライズ待ちカウンタデクリメント */
+				R_TAU0_Channel7_Custom( imTimer07_10msec );						/* 10msecWait */
+				gvModuleSts.mRtc = ecRtcModuleSts_Wait;
+			}
+			else
+			{
+				wkRetryCnt = 0U;												/* リトライカウンタ初期化 */
+				/* IC内部の初期化 */
+				do
+				{
+					/* ステータスレジスタ1書き込み（リセット） */
+					wkStsReg1 = (uint8_t)imRtcDrv_StsReg1_RESET;				/* ステータスレジスタ1＝リセット */
+					gvIicSndEndFlg = imOFF;										/* 送信完了フラグOFF */
+					R_IIC00_Master_Send( imRtcDrv_StsReg1WriteCmd, &wkStsReg1, 1U );
+//					wkRet = SubRtcDrv_SndFlgChk();								/* 送信フラグ監視 */
+					wkRet = SubRtcDrv_FlgChk( &gvIicSndEndFlg );
+					/* ステータスレジスタ1読出し */
+					gvIicRcvEndFlg = imOFF;										/* 送信完了フラグOFF */
+					R_IIC00_Master_Receive( imRtcDrv_StsReg1ReadCmd, &wkStsReg1, 1U );
+//					wkRet = SubRtcDrv_RcvFlgChk();								/* 受信フラグ監視 */
+					wkRet = SubRtcDrv_FlgChk( &gvIicRcvEndFlg );
+					wkRetryCnt++;												/* リトライカウンタ初期化 */
+					if( wkRetryCnt > imRtcDrv_RetryCnt )
+					{
+						wkRet = ecERR_NG;										/* RTC異常 */
+						break;
+					}
+				} while( M_TSTBIT( wkStsReg1, imRtcDrv_StsReg1_POC ) || M_TSTBIT( wkStsReg1, imRtcDrv_StsReg1_BLD ) );
+				
+				/* RTC正常 */
+				if( wkRet == ecERR_OK )
+				{
+					wkRetryCnt = 0U;											/* リトライカウンタ初期化 */
+					/* 24時間表示設定 */
+					do
+					{
+						/* ステータスレジスタ1書き込み（24時間表示） */
+						wkStsReg1 = (uint8_t)imRtcDrv_StsReg1_12_24;			/* ステータスレジスタ1＝24時間表示 */
+						gvIicSndEndFlg = imOFF;									/* 送信完了フラグOFF */
+						R_IIC00_Master_Send( imRtcDrv_StsReg1WriteCmd, &wkStsReg1, 1U );
+//						wkRet = SubRtcDrv_SndFlgChk();							/* 送信フラグ監視 */
+						wkRet = SubRtcDrv_FlgChk( &gvIicSndEndFlg );
+						/* ステータスレジスタ1読出し */
+						gvIicRcvEndFlg = imOFF;									/* 送信完了フラグOFF */
+						R_IIC00_Master_Receive( imRtcDrv_StsReg1ReadCmd, &wkStsReg1, 1U );
+//						wkRet = SubRtcDrv_RcvFlgChk();							/* 受信フラグ監視 */
+						wkRet = SubRtcDrv_FlgChk( &gvIicRcvEndFlg );
+						wkRetryCnt++;											/* リトライカウンタ初期化 */
+						if( wkRetryCnt > imRtcDrv_RetryCnt )
+						{
+							wkRet = ecERR_NG;									/* RTC異常 */
+							break;
+						}
+					} while( !M_TSTBIT( wkStsReg1, imRtcDrv_StsReg1_12_24 ) );
+				}
+				
+				/* RTC正常 */
+				if( wkRet == ecERR_OK )
+				{
+					wkRetryCnt = 0U;											/* リトライカウンタ初期化 */
+					/* リアルタイムデータ1設定（2020/01/01 00:00:00） */
+					wkRTC.mYear = 20U;											/* 年 */
+					wkRTC.mMonth = 1U;											/* 月 */
+					wkRTC.mDay = 1U;											/* 日 */
+					wkRTC.mWeek = 0U;											/* 曜日 */
+					wkRTC.mHour = 0U;											/* 時 */
+					wkRTC.mMin = 0U;											/* 分 */
+					wkRTC.mSec = 0U;											/* 秒 */
+					do
+					{
+						/* リアルタイムデータ1書き込み */
+						wkRet = SubRtcDrv_SetRtc( &wkRTC );						/* RTC(S-35390A) 日時設定処理 */
+						if( wkRet == ecERR_OK )
+						{
+							/* リアルタイムデータ1読出し */
+							wkRet = SubRtcDrv_ReadRtc();						/* RTC(S-35390A) 日時読み出し処理 */
+						}
+						
+						wkRetryCnt++;											/* リトライカウンタ初期化 */
+						if( wkRetryCnt > imRtcDrv_RetryCnt )
+						{
+							wkRet = ecERR_NG;									/* RTC異常 */
+							break;
+						}
+					} while( wkRet != ecERR_OK );
+					
+					/* 外付けRTCファーストライト */
+					if( gvInFlash.mProcess.mRtcFirstWrChk != imRtcWrFirstVal )
+					{
+						gvInFlash.mProcess.mRtcFirstWrChk = imRtcWrFirstVal;
+						gvModuleSts.mInFlash = ecInFlashWrExeSts_Run;
+					}
+					else
+					{
+						/* 外付けRTCファーストでないのに、レジスタ初期化実行された */
+						gvDispMode.mNowDisp = ecDispMode_UpErrDwRtc;
+					}
+				}
+				
+				vRtcDrvPrm.mInitSts = ecRtcDrvInitSts_InitEnd;					/* 初期化ステータス＝初期化完了 */
+			}
+			break;
+			
+		/* 24時間管理設定 */
+		case ecRtcDrvInitSts_24Write:
+			wkRetryCnt = 0U;													/* リトライカウンタ初期化 */
+			/* 24時間表示設定 */
+			do
+			{
+				/* ステータスレジスタ1書き込み（24時間表示） */
+				wkStsReg1 = (uint8_t)imRtcDrv_StsReg1_12_24;					/* ステータスレジスタ1＝24時間表示 */
+				gvIicSndEndFlg = imOFF;											/* 送信完了フラグOFF */
+				R_IIC00_Master_Send( imRtcDrv_StsReg1WriteCmd, &wkStsReg1, 1U );
+//				wkRet = SubRtcDrv_SndFlgChk();									/* 送信フラグ監視 */
+				wkRet = SubRtcDrv_FlgChk( &gvIicSndEndFlg );
+				/* ステータスレジスタ1読出し */
+				gvIicRcvEndFlg = imOFF;											/* 送信完了フラグOFF */
+				R_IIC00_Master_Receive( imRtcDrv_StsReg1ReadCmd, &wkStsReg1, 1U );
+//				wkRet = SubRtcDrv_RcvFlgChk();									/* 受信フラグ監視 */
+				wkRet = SubRtcDrv_FlgChk( &gvIicRcvEndFlg );
+				wkRetryCnt++;													/* リトライカウンタ初期化 */
+				if( wkRetryCnt > imRtcDrv_RetryCnt )
+				{
+					wkRet = ecERR_NG;											/* RTC異常 */
+					break;
+				}
+			} while( !M_TSTBIT( wkStsReg1, imRtcDrv_StsReg1_12_24 ) );
+			
+			vRtcDrvPrm.mInitSts = ecRtcDrvInitSts_RealRead;
+			break;
+			
+		/* リアルタイムデータ読み出し */
+		case ecRtcDrvInitSts_RealRead:
+			wkRetryCnt = 0U;													/* リトライカウンタ初期化 */
+			do
+			{
+				/* リアルタイムデータ1読出し */
+				wkRet = SubRtcDrv_ReadRtc();										/* RTC(S-35390A) 日時読み出し処理 */
+				
+				wkRetryCnt++;													/* リトライカウンタ初期化 */
+				if( wkRetryCnt > imRtcDrv_RetryCnt )
+				{
+					break;
+				}
+			} while( wkRet != ecERR_OK );
+			
+			vRtcDrvPrm.mInitSts = ecRtcDrvInitSts_InitEnd;						/* 初期化ステータス＝初期化完了 */
+			break;
+			
+		/* 初期化完了 */
+		case ecRtcDrvInitSts_InitEnd:
+		default:
+			break;
+	}
+	
+	if( vRtcDrvPrm.mInitSts == ecRtcDrvInitSts_InitEnd )
+	{
+		/* 2021年以下ならRTCエラー */
+		if( gvClock.mYear < 22U )
+		{
+			wkRet = ecERR_NG;													/* RTC異常 */
+		}
+	}
+	
+	if( wkRet != ecERR_OK )
+	{
+		/* 外付けRTC失敗:Err表示し、ロガー動作させない */
+		gvDispMode.mNowDisp = ecDispMode_UpErrDwRtc;
+	}
+}
+
+
+/*
+ *******************************************************************************
+ *	RTC(S-35390A) 日時設定処理
+ *
+ *	[内容]
+ *		日時の設定を行う。
+ *	[注記]
+ *		リアルタイムデータ1の各データ(年,月,日,曜日,時,分,秒)はBCDコードで、
+ *		LSBファーストで送信する。
+ *******************************************************************************
+ */
+static ET_Error_t SubRtcDrv_SetRtc( const ST_RTC_t *parRtc )
+{
+	union
+	{
+		uint8_t		umU8[8];
+		uint32_t	umU32[2];
+	} wkSndData;
+	
+	uint8_t		wkStsReg1;
+	
+	
+	ET_Error_t	wkRet = ecERR_OK;
+	
+	if( parRtc != M_NULL )
+	{
+		/* ステータスレジスタ1読出し */
+		gvIicRcvEndFlg = imOFF;														/* 送信完了フラグOFF */
+		R_IIC00_Master_Receive( imRtcDrv_StsReg1ReadCmd, &wkStsReg1, 1U );
+//		wkRet = SubRtcDrv_RcvFlgChk();												/* 受信フラグ監視 */
+		wkRet = SubRtcDrv_FlgChk( &gvIicRcvEndFlg );
+		if( !M_TSTBIT( wkStsReg1, imRtcDrv_StsReg1_12_24 ) )						/* 時間:12/24 */
+		{
+			/* ステータスレジスタ1書き込み（24時間表示） */
+			wkStsReg1 = (uint8_t)imRtcDrv_StsReg1_12_24;							/* ステータスレジスタ1＝24時間表示 */
+			gvIicSndEndFlg = imOFF;													/* 送信完了フラグOFF */
+			R_IIC00_Master_Send( imRtcDrv_StsReg1WriteCmd, &wkStsReg1, 1U );
+//			wkRet = SubRtcDrv_SndFlgChk();											/* 送信フラグ監視 */
+			wkRet = SubRtcDrv_FlgChk( &gvIicSndEndFlg );
+		}
+		
+		/* RTC正常 */
+		if( wkRet == ecERR_OK )
+		{
+			/* Bin→BCDデータ変換 */
+			wkSndData.umU8[3] = SubRtcDrv_BinToBcd( parRtc->mYear );				/* 年(BCDデータ) */
+			wkSndData.umU8[2] = SubRtcDrv_BinToBcd( parRtc->mMonth );				/* 月(BCDデータ) */
+			wkSndData.umU8[1] = SubRtcDrv_BinToBcd( parRtc->mDay );					/* 日(BCDデータ) */
+			wkSndData.umU8[0] = SubRtcDrv_BinToBcd( parRtc->mWeek );				/* 曜日(BCDデータ) */
+			
+			wkSndData.umU8[7] = SubRtcDrv_BinToBcd( parRtc->mHour );				/* 時(BCDデータ) */
+			wkSndData.umU8[6] = SubRtcDrv_BinToBcd( parRtc->mMin );					/* 分(BCDデータ) */
+			wkSndData.umU8[5] = SubRtcDrv_BinToBcd( parRtc->mSec );					/* 秒(BCDデータ) */
+			wkSndData.umU8[4] = 0x00U;												/* ダミー(未使用) */
+			
+			wkSndData.umU32[0] = SubRtcDrv_ReverseBit32( wkSndData.umU32[0] );		/* MSBファースト→LSBファースト変換 */
+			wkSndData.umU32[1] = SubRtcDrv_ReverseBit32( wkSndData.umU32[1] );		/* MSBファースト→LSBファースト変換 */
+			
+			/* リアルタイムデータ1書き込み */
+			gvIicSndEndFlg = imOFF;													/* 送信完了フラグOFF */
+			R_IIC00_Master_Send(imRtcDrv_RealTime1WriteCmd, &wkSndData.umU8[0], 7U);
+//			wkRet = SubRtcDrv_SndFlgChk();											/* 送信フラグ監視 */
+			wkRet = SubRtcDrv_FlgChk( &gvIicSndEndFlg );
+		}
+	}
+	
+	return wkRet;
+}
+
+
+/*
+ *******************************************************************************
+ *	RTC(S-35390A) 日時読み出し処理
+ *
+ *	[内容]
+ *		RTCが異常な場合は、ecERR_NGを返す。
+ *******************************************************************************
+ */
+static ET_Error_t SubRtcDrv_ReadRtc( void )
+{
+	union
+	{
+		uint8_t		umU8[8];
+		uint32_t	umU32[2];
+	} wkRcvData;																/* RTC受信データ */
+	
+	ET_Error_t				wkRet = ecERR_OK;									/* 戻り値(エラー情報) */
+	
+	/* リアルタイムデータ1読出し */
+	gvIicRcvEndFlg = imOFF;														/* 送信完了フラグOFF */
+	R_IIC00_Master_Receive(imRtcDrv_RealTime1ReadCmd, &wkRcvData.umU8[0], 7U);
+	
+//	wkRet = SubRtcDrv_RcvFlgChk();												/* 受信フラグ監視 */
+	wkRet = SubRtcDrv_FlgChk( &gvIicRcvEndFlg );
+	if( wkRet == ecERR_OK )														/* RTC正常時 */
+	{
+		wkRcvData.umU32[0] = SubRtcDrv_ReverseBit32( wkRcvData.umU32[0] );		/* LSBファースト→MSBファースト変換 */
+		wkRcvData.umU32[1] = SubRtcDrv_ReverseBit32( wkRcvData.umU32[1] );		/* LSBファースト→MSBファースト変換 */
+		
+		/* BCD→Binデータ変換 */
+		gvClock.mYear = SubRtcDrv_BcdToBin( wkRcvData.umU8[3] );				/* 年 */
+		gvClock.mMonth = SubRtcDrv_BcdToBin( wkRcvData.umU8[2] );				/* 月 */
+		gvClock.mDay = SubRtcDrv_BcdToBin( wkRcvData.umU8[1] );					/* 日 */
+		gvClock.mWeek = SubRtcDrv_BcdToBin( wkRcvData.umU8[0] );				/* 曜日 */
+		gvClock.mHour = SubRtcDrv_BcdToBin( (wkRcvData.umU8[7] & 0x3FU) );		/* 時 */
+		gvClock.mMin = SubRtcDrv_BcdToBin( wkRcvData.umU8[6] );					/* 分 */
+		gvClock.mSec = SubRtcDrv_BcdToBin( wkRcvData.umU8[5] );					/* 秒 */
+	}
+	
+	return wkRet;
+}
+
+
+/*
+ *******************************************************************************
+ *	Bin→BCDデータ変換
+ *
+ *	[内容]
+ *		Bin→BCDデータ変換を行う。
+ *******************************************************************************
+ */
+static uint8_t SubRtcDrv_BinToBcd( uint8_t arBin )
+{
+	uint8_t		wkU8_H;															/* uint8_t型ワークH */
+	uint8_t		wkU8_L;															/* uint8_t型ワークL */
+	uint8_t		wkBcd;															/* BCDデータ */
+
+	wkU8_H = (arBin / 10U) << 4U;
+	wkU8_L = arBin % 10U;
+
+	wkBcd = wkU8_H + wkU8_L;
+
+	return wkBcd;
+}
+
+
+/*
+ *******************************************************************************
+ *	BCD→Binデータ変換
+ *
+ *	[内容]
+ *		BCD→Binデータ変換を行う。
+ *******************************************************************************
+ */
+static uint8_t SubRtcDrv_BcdToBin( uint8_t arBcd )
+{
+	uint8_t		wkU8_H;															/* uint8_t型ワークH */
+	uint8_t		wkU8_L;															/* uint8_t型ワークL */
+	uint8_t		wkBin;															/* Binデータ */
+
+	wkU8_H = (arBcd >> 4U) * 10U;
+	wkU8_L = arBcd & 0x0FU;
+
+	wkBin = wkU8_H + wkU8_L;
+
+	return wkBin;
+}
+
+
+/*
+ *******************************************************************************
+ *	ビット順並べ替え(32bit)
+ *
+ *	[内容]
+ *		ビットの並び順を逆にする。（MSBとLSBを逆にする）
+ *******************************************************************************
+ */
+static uint32_t	SubRtcDrv_ReverseBit32( uint32_t arData )
+{
+	uint32_t	wkRet;															/* 戻り値 */
+	uint8_t		wkLoop;															/* ループカウンタ */
+	uint8_t		wkShift;														/* シフト回数 */
+	uint32_t	wkMask;															/* マスクデータ */
+
+	wkRet = 0U;
+	for (wkLoop = 0U; wkLoop < 16U; wkLoop++)
+	{
+		wkShift = 31U - (wkLoop * 2U);											/* wkShift＝31,29,27,・・・,7,5,3,1 */
+
+		/*
+		 ***************************************
+		 *	bit0～15をbit31～16に入れ替え
+		 ***************************************
+		 */
+		wkMask = (uint32_t)M_BIT0 << wkLoop;
+		wkRet |= (arData & wkMask) << wkShift;
+
+		/*
+		 ***************************************
+		 *	bit31～16をbit0～15に入れ替え
+		 ***************************************
+		 */
+		wkMask = (uint32_t)M_BIT31 >> wkLoop;
+		wkRet |= (arData & wkMask) >> wkShift;
+	}
+
+	return wkRet;
+}
+
+#if 0
+/*
+ *******************************************************************************
+ *	RTC(S-35390A) 1Hz出力処理
+ *
+ *	[引数]
+ *		uint8_t	arSelect:出力のON/OFF切替
+ *	[戻値]
+ *		ET_Error_t wkRet:制御結果
+ *	[内容]
+ *		1Hzの出力をINT2端子より行う。
+ *******************************************************************************
+ */
+void ApiRtcDrv_1HzOut( uint8_t arSelect )
+{
+	uint8_t		wkStsReg2;
+	uint8_t		wkInt2Reg;
+	ET_Error_t	wkRet = ecERR_OK;												/* 戻り値(エラー情報) */
+	
+	/* ステータスレジスタ2読出し処理 */
+	gvIicRcvEndFlg = imOFF;														/* 送信完了フラグOFF */
+	R_IIC00_Master_Receive(imRtcDrv_StsReg2ReadCmd, &wkStsReg2, 1U);
+//	wkRet = SubRtcDrv_RcvFlgChk();												/* 受信フラグ監視 */
+	wkRet = SubRtcDrv_FlgChk( &gvIicRcvEndFlg );
+	if( wkRet == ecERR_OK )														/* RTC正常 */
+	{
+		if( arSelect == 1U )
+		{
+			M_CLRBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_ME );					/* INT2ME＝0 */
+			M_SETBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_FE );					/* INT2FE＝1 */
+		}
+		else
+		{
+			M_CLRBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_ME );					/* INT2ME＝0 */
+			M_CLRBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_FE );					/* INT2FE＝0 */
+		}
+		
+		/* ステータスレジスタ2書き込み処理 */
+		gvIicSndEndFlg = imOFF;													/* 送信完了フラグOFF */
+		R_IIC00_Master_Send(imRtcDrv_StsReg2WriteCmd, &wkStsReg2, 1U);
+//		wkRet = SubRtcDrv_SndFlgChk();											/* 送信フラグ監視 */
+		wkRet = SubRtcDrv_FlgChk( &gvIicSndEndFlg );
+	}
+	
+	if( wkRet == ecERR_OK )														/* RTC正常 */
+	{
+		/* ステータスレジスタ2読出し処理 */
+		gvIicRcvEndFlg = imOFF;													/* 送信完了フラグOFF */
+		R_IIC00_Master_Receive(imRtcDrv_StsReg2ReadCmd, &wkStsReg2, 1U);
+//		wkRet = SubRtcDrv_RcvFlgChk();											/* 受信フラグ監視 */
+		wkRet = SubRtcDrv_FlgChk( &gvIicRcvEndFlg );
+		if( arSelect == 1U )
+		{
+			if( M_TSTBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_ME ) || !M_TSTBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_FE ) )
+			{
+				wkRet = ecERR_NG;
+			}
+		}
+		else
+		{
+			if( M_TSTBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_ME ) || M_TSTBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_FE ) )
+			{
+				wkRet = ecERR_NG;
+			}
+		}
+	}
+	
+	if( wkRet == ecERR_OK )														/* RTC正常 */
+	{
+		gvIicSndEndFlg = imOFF;													/* 送信完了フラグOFF */
+		wkInt2Reg = imRtcDrv_Int2Reg_1Hz;										/* INT2レジスタ 1Hzビット位置 */
+		R_IIC00_Master_Send(imRtcDrv_Int2RegWriteCmd, &wkInt2Reg, 1U);
+//		wkRet = SubRtcDrv_SndFlgChk();											/* 送信フラグ監視 */
+		wkRet = SubRtcDrv_FlgChk( &gvIicSndEndFlg );
+	}
+	
+	if( wkRet == ecERR_OK )														/* RTC正常 */
+	{
+		/* INTP2レジスタ読出し処理 */
+		gvIicRcvEndFlg = imOFF;													/* 送信完了フラグOFF */
+		R_IIC00_Master_Receive(imRtcDrv_Int2RegReadCmd, &wkInt2Reg, 1U);
+//		wkRet = SubRtcDrv_RcvFlgChk();											/* 受信フラグ監視 */
+		wkRet = SubRtcDrv_FlgChk( &gvIicRcvEndFlg );
+		if( wkInt2Reg != imRtcDrv_Int2Reg_1Hz )
+		{
+			wkRet = ecERR_NG;
+		}
+	}
+}
+#endif
+
+#if (swKouteiMode == imEnable)
+/*
+ *******************************************************************************
+ *	RTC(S-35390A) 1Hz出力制御状態リード
+ *
+ *	[引数]
+ *		なし
+ *	[戻値]
+ *		uint8_t wkRet: 出力制御状態
+ *	[内容]
+ *		RTC(S-35390A) 1Hz出力制御状態リード
+ *******************************************************************************
+ */
+uint8_t ApiRtcDrv_1HzOutRead( void )
+{
+	uint8_t		wkStsReg2;
+	uint8_t		wkRet;
+	
+	/* ステータスレジスタ2読出し処理 */
+	gvIicRcvEndFlg = imOFF;													/* 送信完了フラグOFF */
+	R_IIC00_Master_Receive(imRtcDrv_StsReg2ReadCmd, &wkStsReg2, 1U);
+//	wkRet = SubRtcDrv_RcvFlgChk();											/* 受信フラグ監視 */
+	wkRet = SubRtcDrv_FlgChk( &gvIicRcvEndFlg );
+	if( !M_TSTBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_ME ) && M_TSTBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_FE ) )
+	{
+		wkRet = 1U;
+	}
+	else if( !M_TSTBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_ME ) && !M_TSTBIT( wkStsReg2, imRtcDrv_StsReg2_INT2_FE ) )
+	{
+		wkRet = 0U;
+	}
+	else
+	{
+		wkRet = 2U;
+	}
+	return wkRet;
+}
+#endif
+
+/*
+ *******************************************************************************
+ *	外付けRTC通信受信フラグ監視
+ *
+ *	[内容]
+ *		外付けRTCとの通信時の受信フラグ監視
+ *	[引数]
+ *		なし
+ *	[戻り値]
+ *		ET_Error_t	wkRet: エラー情報
+ *******************************************************************************
+ */
+static ET_Error_t SubRtcDrv_FlgChk( uint8_t* gvFlg )
+{
+	uint16_t	wkErrJdgCnt = 0U;
+	ET_Error_t	wkRet = ecERR_OK;
+	
+	while( *gvFlg == imOFF )										/* 送信完了フラグがONになるまで */
+	{
+		wkErrJdgCnt++;
+		if( wkErrJdgCnt > imErrJdgTimer )									/* 1ms超過で外付けRTCへのアクセス失敗 */
+		{
+			wkRet = ecERR_NG;												/* RTC異常 */
+			break;
+		}
+	}
+	return wkRet;
+}
+#if 0
+/*
+ *******************************************************************************
+ *	外付けRTC通信受信フラグ監視
+ *
+ *	[内容]
+ *		外付けRTCとの通信時の受信フラグ監視
+ *	[引数]
+ *		なし
+ *	[戻り値]
+ *		ET_Error_t	wkRet: エラー情報
+ *******************************************************************************
+ */
+static ET_Error_t SubRtcDrv_RcvFlgChk( void )
+{
+	uint16_t	wkErrJdgCnt = 0U;
+	ET_Error_t	wkRet = ecERR_OK;
+	
+	while( gvIicRcvEndFlg == imOFF )										/* 送信完了フラグがONになるまで */
+	{
+		wkErrJdgCnt++;
+		if( wkErrJdgCnt > imErrJdgTimer )									/* 1ms超過で外付けRTCへのアクセス失敗 */
+		{
+			wkRet = ecERR_NG;												/* RTC異常 */
+			break;
+		}
+	}
+	return wkRet;
+}
+
+/*
+ *******************************************************************************
+ *	外付けRTC通信送信フラグ監視
+ *
+ *	[内容]
+ *		外付けRTCとの通信時の送信フラグ監視
+ *	[引数]
+ *		なし
+ *	[戻り値]
+ *		ET_Error_t	wkRet: エラー情報
+ *******************************************************************************
+ */
+static ET_Error_t SubRtcDrv_SndFlgChk( void )
+{
+	uint16_t	wkErrJdgCnt = 0U;
+	ET_Error_t	wkRet = ecERR_OK;
+	
+	while( gvIicSndEndFlg == imOFF )										/* 送信完了フラグがONになるまで */
+	{
+		wkErrJdgCnt++;
+		if( wkErrJdgCnt > imErrJdgTimer )									/* 1ms超過で外付けRTCへのアクセス失敗 */
+		{
+			wkRet = ecERR_NG;												/* RTC異常 */
+			break;
+		}
+	}
+	return wkRet;
+}
+#endif
+
+/*
+ *******************************************************************************
+ *	内蔵RTCの時刻を外付けRTCに書き込む処理
+ *
+ *	[内容]
+ *		内蔵RTCの時刻を外付けRTCに書き込む。
+ *******************************************************************************
+ */
+void ApiRtcDrv_InRtcToExRtc( void )
+{
+	rtc_counter_value_t	wkInRTC;												/* 内蔵RTCデータ */
+	ST_RTC_t			wkExRTC;												/* 外付けRTCデータ */
+	uint8_t				wkLoop;
+	uint8_t				wkLoopA;
+	
+	for( wkLoop = 0U ; wkLoop < imInRtcJdgCnt ; wkLoop++ )
+	{
+		/* 内蔵RTCの時刻取得 */
+		if( MD_OK == R_RTC_Get_CounterValue( &wkInRTC ) )
+		{
+			/* 内蔵RTCの時刻をBCD→BIN変換 */
+			wkExRTC.mYear = SubRtcDrv_BcdToBin( wkInRTC.year );						/* 年(BCDデータ) */
+			wkExRTC.mMonth = SubRtcDrv_BcdToBin( wkInRTC.month );					/* 月(BCDデータ) */
+			wkExRTC.mDay = SubRtcDrv_BcdToBin( wkInRTC.day );						/* 日(BCDデータ) */
+			wkExRTC.mWeek = SubRtcDrv_BcdToBin( wkInRTC.week );						/* 曜(BCDデータ) */
+			wkExRTC.mHour = SubRtcDrv_BcdToBin( wkInRTC.hour );						/* 時(BCDデータ) */
+			wkExRTC.mMin = SubRtcDrv_BcdToBin( wkInRTC.min );						/* 分(BCDデータ) */
+			wkExRTC.mSec = SubRtcDrv_BcdToBin( wkInRTC.sec );						/* 秒(BCDデータ) */
+			
+			for( wkLoopA = 0U ; wkLoopA < imExRtcJdgCnt ; wkLoopA++ )
+			{
+				/* 内蔵RTCの時刻を外付けRTCに書き込む */
+				if( ecERR_OK == SubRtcDrv_SetRtc( &wkExRTC ) )
+				{
+#if 0	/* 機器異常復帰させない */
+					/* 外付けRTC復帰 */
+					ApiAbn_AbnStsClr( imAbnSts_RTC, ecAbnInfKind_AbnSts );
+#endif
+					break;
+				}
+			}
+			
+			if( wkLoopA >= imExRtcJdgCnt )
+			{
+				/* 外付けRTC異常 */
+				ApiAbn_AbnStsSet( imAbnSts_RTC, ecAbnInfKind_AbnSts );
+			}
+			break;
+		}
+	}
+	
+	SubRtcDrv_InRtcErrSet( wkLoop );		/* 内蔵RTC異常判定 */
+}
+
+
+/*
+ *******************************************************************************
+ *	外付けRTCの時刻を内蔵RTCに書き込む処理
+ *
+ *	[内容]
+ *		外付けRTCの時刻を内蔵RTCに書き込む。
+ *******************************************************************************
+ */
+void ApiRtcDrv_ExRtcToInRtc( void )
+{
+	rtc_counter_value_t	wkInRTC;					/* 内蔵RTCデータ */
+	uint8_t				wkLoop;
+	uint8_t				wkLoopA;
+	
+	for( wkLoopA = 0U ; wkLoopA < imExRtcJdgCnt ; wkLoopA++ )
+	{
+		/* 外付けRTCの時刻取得 */
+		if( ecERR_OK == SubRtcDrv_ReadRtc() )
+		{
+			/* 内蔵RTC用パラメータに置き換え */
+			wkInRTC.year = SubRtcDrv_BinToBcd(gvClock.mYear);
+			wkInRTC.month = SubRtcDrv_BinToBcd(gvClock.mMonth);
+			wkInRTC.day = SubRtcDrv_BinToBcd(gvClock.mDay);
+			wkInRTC.week = SubRtcDrv_BinToBcd(gvClock.mWeek);
+			wkInRTC.hour = SubRtcDrv_BinToBcd(gvClock.mHour);
+			wkInRTC.min = SubRtcDrv_BinToBcd(gvClock.mMin);
+			wkInRTC.sec = SubRtcDrv_BinToBcd(gvClock.mSec);
+			
+			for( wkLoop = 0U ; wkLoop < imInRtcJdgCnt ; wkLoop++ )
+			{
+				/* 外付けRTCの時刻を内蔵RTCに書き込む */
+				if( MD_OK == R_RTC_Set_CounterValue( wkInRTC ) )
+				{
+					break;
+				}
+			}
+			SubRtcDrv_InRtcErrSet( wkLoop );		/* 内蔵RTC異常判定 */
+			break;
+		}
+	}
+	
+	if( wkLoopA >= imExRtcJdgCnt )
+	{
+		/* 外付けRTCリード失敗:Err表示し、ロガー動作させない */
+		gvDispMode.mNowDisp = ecDispMode_UpErrDwRtc;
+	}
+}
+
+/*
+ *******************************************************************************
+ *	内蔵RTCの時刻をリードしてRAMに格納する処理
+ *
+ *	[内容]
+ *		内蔵RTCの時刻をリードしてRAMに格納する。
+ *******************************************************************************
+ */
+void ApiRtcDrv_ReadInRtc( void )
+{
+	rtc_counter_value_t	wkInRTC;												/* 内蔵RTCデータ */
+	uint8_t				wkLoop;
+	
+	for( wkLoop = 0U ; wkLoop < imInRtcJdgCnt ; wkLoop++ )
+	{
+		/* 内蔵RTCの時刻取得 */
+		if( MD_OK == R_RTC_Get_CounterValue( &wkInRTC ) )
+		{
+			/* 内蔵RTCの時刻をBCD→BIN変換 */
+			gvClock.mYear = SubRtcDrv_BcdToBin( wkInRTC.year );					/* 年(BCDデータ) */
+			gvClock.mMonth = SubRtcDrv_BcdToBin( wkInRTC.month );				/* 月(BCDデータ) */
+			gvClock.mDay = SubRtcDrv_BcdToBin( wkInRTC.day );					/* 日(BCDデータ) */
+			gvClock.mWeek = SubRtcDrv_BcdToBin( wkInRTC.week );					/* 曜(BCDデータ) */
+			gvClock.mHour = SubRtcDrv_BcdToBin( wkInRTC.hour );					/* 時(BCDデータ) */
+			gvClock.mMin = SubRtcDrv_BcdToBin( wkInRTC.min );					/* 分(BCDデータ) */
+			gvClock.mSec = SubRtcDrv_BcdToBin( wkInRTC.sec );					/* 秒(BCDデータ) */
+			break;
+		}
+	}
+	
+	SubRtcDrv_InRtcErrSet( wkLoop );		/* 内蔵RTC異常判定 */
+}
+
+
+/*
+ *******************************************************************************
+ *	内蔵RTCに時刻をライトする処理
+ *
+ *	[内容]
+ *		内蔵RTCに時刻をライトする。
+ *******************************************************************************
+ */
+void ApiRtcDrv_SetInRtc( ST_RTC_t arClock )
+{
+	rtc_counter_value_t	wkInRTC;
+	uint8_t				wkLoop;
+	
+	/* 内蔵RTC用パラメータに置き換え */
+	wkInRTC.year = SubRtcDrv_BinToBcd( arClock.mYear );
+	wkInRTC.month = SubRtcDrv_BinToBcd( arClock.mMonth );
+	wkInRTC.day = SubRtcDrv_BinToBcd( arClock.mDay );
+	wkInRTC.week = SubRtcDrv_BinToBcd( arClock.mWeek );
+	wkInRTC.hour = SubRtcDrv_BinToBcd( arClock.mHour );
+	wkInRTC.min = SubRtcDrv_BinToBcd( arClock.mMin );
+	wkInRTC.sec = SubRtcDrv_BinToBcd( arClock.mSec );
+	
+	for( wkLoop = 0U ; wkLoop < imInRtcJdgCnt ; wkLoop++ )
+	{
+		/* 内蔵RTCに書き込む */
+		if( MD_OK == R_RTC_Set_CounterValue( wkInRTC ) )
+		{
+			break;
+		}
+	}
+	
+	SubRtcDrv_InRtcErrSet( wkLoop );		/* 内蔵RTC異常判定 */
+}
+
+
+/*
+ *******************************************************************************
+ *	内蔵RTC異常判定
+ *
+ *	[内容]
+ *		引数をもとに内蔵RTCの異常判定して復帰、異常をセットする。
+ *******************************************************************************
+ */
+static void SubRtcDrv_InRtcErrSet( uint8_t arLoop )
+{
+#if 0	/* 機器異常復帰させない */
+	if( arLoop < imInRtcJdgCnt )
+	{
+		/* 内蔵RTC復帰 */
+		ApiAbn_AbnStsClr( imAbnSts_INRTC, ecAbnInfKind_AbnSts );
+	}
+	else
+	{
+		/* 内蔵RTC異常 */
+		ApiAbn_AbnStsSet( imAbnSts_INRTC, ecAbnInfKind_AbnSts );
+		}
+#else
+	if( arLoop >= imInRtcJdgCnt )
+	{
+		/* 内蔵RTC異常 */
+		ApiAbn_AbnStsSet( imAbnSts_INRTC, ecAbnInfKind_AbnSts );
+	}
+#endif
+}
+
+
+/*
+ *******************************************************************************
+ * 経過秒数算出
+ *
+ *	[内容]
+ *		2020/1/1 00:00:00から引数日時までの経過秒数を算出する。
+ *	[引数]
+ *		ST_RTC_t arClock : 時刻データ
+ *	[戻値]
+ *		uint32_t wkTotalSec : 2020/1/1 00:00:00からの経過秒数
+ *******************************************************************************
+ */
+uint32_t ApiRtcDrv_mktime( ST_RTC_t arClock )
+{
+	uint16_t	wkYear;
+	uint8_t		wkMonth;
+	uint8_t		wkDay;
+	uint8_t		wkHour;
+	uint8_t		wkMin;
+	uint8_t		wkSec;
+	uint8_t		wkLeap;
+	uint16_t	wkLoop;
+	sint16_t	wkDay1;
+	uint16_t	wkDay2;
+	uint32_t	wkU32;
+	uint32_t	wkTotalSec;
+	ST_RTC_t	wkRTC;
+	
+	
+	wkRTC.mYear = arClock.mYear;
+	wkRTC.mMonth = arClock.mMonth;
+	wkRTC.mDay = arClock.mDay;
+	wkRTC.mWeek = arClock.mWeek;
+	wkRTC.mHour = arClock.mHour;
+	wkRTC.mMin = arClock.mMin;
+	wkRTC.mSec = arClock.mSec;
+	
+	wkDay1 = 0U;
+	wkDay2 = 0U;
+	
+	/* 年チェック */
+	if( wkRTC.mYear < 20U )
+	{
+		wkYear = 20U;
+	}
+	else if( wkRTC.mYear > 99U )
+	{
+		wkYear = 99U;
+	}
+	else
+	{
+		wkYear = wkRTC.mYear;
+	}
+	
+	/* 月チェック */
+	if( wkRTC.mMonth == 0U )
+	{
+		wkMonth = 1U;
+	}
+	else if( wkRTC.mMonth > 12U )
+	{
+		wkMonth = 12U;
+	}
+	else
+	{
+		wkMonth = wkRTC.mMonth;
+	}
+	
+	/* 日チェック */
+	if( wkRTC.mDay == 0U )
+	{
+		wkDay = 1U;
+	}
+	else if( wkRTC.mDay > 31U )
+	{
+		wkDay = 31U;
+	}
+	else
+	{
+		wkDay = wkRTC.mDay;
+	}
+	
+	/* 時チェック */
+	if( wkRTC.mHour > 23U )
+	{
+		wkHour = 23U;
+	}
+	else
+	{
+		wkHour = wkRTC.mHour;
+	}
+	
+	/* 分チェック */
+	if( wkRTC.mMin > 59U )
+	{
+		wkMin = 59U;
+	}
+	else
+	{
+		wkMin = wkRTC.mMin;
+	}
+	
+	/* 秒チェック */
+	if( wkRTC.mSec > 59U )
+	{
+		wkSec = 59U;
+	}
+	else
+	{
+		wkSec = wkRTC.mSec;
+	}
+	
+	/*
+	 ***************************************
+	 *	指定した年の前年までの日数算出
+	 ***************************************
+	 */
+	wkYear += 2000U;
+	if( wkYear > 2020U )
+	{
+		for( wkLoop = 2020U; wkLoop <= wkYear-1U; wkLoop++ )
+		{
+			wkDay1 += 365U;
+			if( (!(wkLoop % 4U) && (wkLoop % 100U)) || !(wkLoop % 400U) )	/* うるう年 */
+			{
+				wkDay1++;													/* 日数を1増加 */
+			}
+			else															/* 平年 */
+			{
+				;															/* 無処理 */
+			}
+		}
+	}
+	wkDay1 -= 1U;
+	
+	/*
+	 ***************************************
+	 *	指定した年がうるう年か判定
+	 ***************************************
+	 */
+	if( (!(wkYear % 4U) && (wkYear % 100U)) || !(wkYear % 400U) )			/* うるう年 */
+	{
+		wkLeap = 1U;
+	}
+	else																	/* 平年 */
+	{
+		wkLeap = 0U;
+	}
+	
+	/*
+	 ***************************************
+	 *	指定した月の先月までの日数算出
+	 ***************************************
+	 */
+	for( wkLoop = 1U; wkLoop <= (wkMonth - 1U); wkLoop++ )
+	{
+		wkDay2 += cDayofMonth[wkLoop];										/* 月ごとの日数取得 */
+		if( wkLoop == 2U )													/* 2月 */
+		{
+			wkDay2 += wkLeap;
+		}
+	}
+	
+	/*
+	 ***************************************
+	 *	指定した日の前日までの日数算出
+	 ***************************************
+	 */
+	wkDay2 += wkDay;
+	wkDay1 += wkDay2;
+	
+	wkTotalSec = wkDay1;													/* 日数を取得 */
+	wkTotalSec *= 86400U;													/* 日を秒に変換 */
+	wkU32 = (uint32_t)wkHour * 3600U;										/* 時を秒に変換 */
+	wkTotalSec += wkU32;
+	wkU32 = (uint32_t)wkMin * 60U;											/* 分を秒に変換 */
+	wkTotalSec += wkU32;
+	wkTotalSec += wkSec;
+	
+	
+	return wkTotalSec;
+}
+
+
+/*
+ *******************************************************************************
+ * 経過秒数から時刻データへ変換
+ *
+ *	[内容]
+ *		2020/1/1 00:00:00からの経過秒数を時刻データへ変換する。
+ *	[引数]
+ *		uint32_t arTotalSec : 2020/1/1 00:00:00からの経過秒数
+ *	[戻値]
+ *		ST_RTC_t wkClock : 時刻データ
+ *******************************************************************************
+ */
+ST_RTC_t ApiRtcDrv_localtime( uint32_t arTotalSec )
+{
+	ST_RTC_t		wkClock;
+	uint32_t		wkYear;
+	uint32_t		wkMonth;
+	uint32_t		wkDay;
+	uint32_t		wkHour;
+	uint32_t		wkMin;
+	uint32_t		wkSec;
+	uint32_t		wkU32;
+	
+	/* sec */
+	wkSec = arTotalSec % 60U;
+	
+	/* min */
+	arTotalSec -= wkSec;
+	wkU32 = arTotalSec / 60U;
+	wkMin = wkU32 % 60U;
+	
+	/* hour */
+	wkU32 -= wkMin;
+	wkU32 /= 60U;
+	wkHour = wkU32 % 24U;
+	
+	/* day */
+	wkU32 -= wkHour;
+	wkDay = wkU32 / 24U;
+	
+	wkYear = 2020U;
+	while( wkDay >= 365U )
+	{
+		if( (!(wkYear % 4U) && (wkYear % 100U)) || !(wkYear % 400U) )
+		{
+			if( wkDay == 365U )
+			{
+				break;
+			}
+			wkDay -= 366U;
+		}
+		else
+		{
+			wkDay -= 365U;
+		}
+		wkYear ++;
+	}
+	wkDay ++;
+	
+	wkMonth = 1U;
+	while( 1U )
+	{
+		if( (!(wkYear % 4U) && (wkYear % 100U)) || !(wkYear % 400U) )
+		{
+			if( wkDay <= cDayofLeapMonth[ wkMonth ] )
+			{
+				break;
+			}
+			else
+			{
+				wkDay -= cDayofLeapMonth[ wkMonth ];
+				wkMonth ++;
+			}
+		}
+		else
+		{
+			if( wkDay <= cDayofMonth[ wkMonth ] )
+			{
+				break;
+			}
+			else
+			{
+				wkDay -= cDayofMonth[ wkMonth ];
+				wkMonth ++;
+			}
+		}
+	}
+	wkYear -= 2000U;
+	wkClock.mYear = (uint8_t)wkYear;
+	wkClock.mMonth = (uint8_t)wkMonth;
+	wkClock.mDay = (uint8_t)wkDay;
+	wkClock.mHour = (uint8_t)wkHour;
+	wkClock.mMin = (uint8_t)wkMin;
+	wkClock.mSec = (uint8_t)wkSec;
+	
+	return wkClock;
+}
+
+#pragma section
+

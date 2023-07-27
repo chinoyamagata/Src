@@ -1,0 +1,1213 @@
+/*
+ *******************************************************************************
+ *	File name	:	HmiMain.c
+ *
+ *	[内容]
+ *		ユーザインターフェース処理
+ *------------------------------------------------------------------------------
+ *	[変更日]		[変更者]		[概要]
+ *	2017.02.27		Softex K.U		新規作成
+ *******************************************************************************
+ */
+
+#include "cpu_sfr.h"															/* SFR定義ヘッダー */
+
+#include "typedef.h"															/* データ型定義 */
+#include "UserMacro.h"															/* ユーザー作成マクロ定義 */
+#include "immediate.h"															/* immediate定数定義 */
+#include "switch.h"																/* コンパイルスイッチ定義 */
+#include "enum.h"																/* 列挙型の定義 */
+#include "struct.h"																/* 構造体定義 */
+#include "func.h"																/* 関数の外部参照(extern)定義 */
+#include "glLabel.h"															/* グローバル変数・定数(const)ラベル定義 */
+
+
+
+/*
+ *==============================================================================
+ *	define定義
+ *==============================================================================
+ */
+
+
+ /*
+ *==============================================================================
+ *	列挙型定義
+ *==============================================================================
+ */
+
+
+/*
+ *==============================================================================
+ *	構造体定義
+ *==============================================================================
+ */
+
+
+ /*
+ *==============================================================================
+ *	変数定義
+ *==============================================================================
+ */
+#if (swSensorCom == imEnable)
+static uint8_t	vBellMarkSetFlg[ 2U ] = { imOFF, imOFF };						/* ベルマークフラグ */
+#else
+static uint8_t	vBellMarkSetFlg;												/* ベルマークフラグ */
+#endif
+
+/*
+ *==============================================================================
+ *	定数定義
+ *==============================================================================
+ */
+static const char_t cHexVal[ 16U ] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' };
+static const uint8_t cRssi[ 4U ] = { 115, 110, 105, 0 };
+
+
+/*
+ *==============================================================================
+ *	プロトタイプ宣言
+ *==============================================================================
+*/
+static void SubHmi_Disp( void );
+
+static void SubHmi_UpValDsp( void );
+static void SubHmi_UpValDsp_Vol( void );			/* 電圧 */
+static void SubHmi_UpValDsp_Pulse( void );			/* パルス */
+//static void SubHmi_UpVerDsp( void );
+#if (swSensorCom == imEnable)
+static void SubHmi_DwValDsp( void );
+#endif
+static void SubHmi_DwHexDsp( uint16_t arVal );
+static void SubHmi_DwValDsp_Vol( void );			/* 電圧 */
+static void SubHmi_DwValDsp_Pulse( void );			/* パルス */
+//static void SubHmi_AppGrDsp( void );
+static void SubHmi_DwTimeDsp( void );
+static void SubHmi_StsDsp( void );
+static void SubHmi_AlmStsDsp( void );
+static void SubHmi_AlmStsDsp( void );
+static void SubHmi_BellMarkSetDsp( void );
+
+
+#pragma section text MY_APP2
+#if 0
+/*
+ *******************************************************************************
+ *	ユーザインターフェース 初期化処理
+ *
+ *	[内容]
+ *		ユーザインターフェースの初期化処理を行う。（電源ON時の初期化処理）
+ *******************************************************************************
+ */
+void ApiHmi_initial( void )
+{
+	gvDispMode.mNowDisp = ecDispMode_UpVerDwNon;
+	gvDispMode.mPreDisp = ecDispMode_UpVerDwNon;
+}
+#endif
+
+/*
+ *******************************************************************************
+ *	ユーザインターフェース処理メイン
+ *
+ *	[内容]
+ *		ユーザインターフェース処理メイン
+ *******************************************************************************
+ */
+void ApiHmi_Main( void )
+{
+#if (swTmpCntUartOut == imEnable)
+	sint16_t wkMeasTemp;
+#endif
+	SubHmi_Disp();				/* ディスプレイ表示 */
+	
+#if (swTmpCntUartOut == imEnable)
+
+	R_UART2_Create();
+	gvModInf.mComSts = ecComSts_SndWait;
+	gvModuleSts.mCom = ecComModuleSts_Run;
+	
+	gvModInf.mSndBuf[0] = gvMeasThTmCnt.mHigh >> 8;
+	gvModInf.mSndBuf[1] = gvMeasThTmCnt.mHigh & 0x00ff;
+	gvModInf.mSndBuf[2] = gvMeasThTmCnt.mLow >> 8;
+	gvModInf.mSndBuf[3] = gvMeasThTmCnt.mLow & 0x00ff;
+	gvModInf.mSndBuf[4] = gvMeasRefTmCnt.mHigh >> 8;
+	gvModInf.mSndBuf[5] = gvMeasRefTmCnt.mHigh & 0x00ff;
+	gvModInf.mSndBuf[6] = gvMeasRefTmCnt.mLow >> 8;
+	gvModInf.mSndBuf[7] = gvMeasRefTmCnt.mLow & 0x00ff;
+	wkMeasTemp = gvMeasPrm.mMeasVal[ 0U ];
+	gvModInf.mSndBuf[8] = wkMeasTemp >> 8;
+	gvModInf.mSndBuf[9] = wkMeasTemp & 0x00ff;
+	gvModInf.mSndLen = 10;
+#endif
+	
+	/* KeyLock表示から戻るための表示状態をメモリ */
+	if( (gvDispMode.mNowDisp != ecDispMode_Lock) &&
+		(gvDispMode.mNowDisp != ecDispMode_Lock2) &&
+		(gvDispMode.mNowDisp != ecDispMode_AbnChkErr) )
+	{
+		gvDispMode.mPreDisp = gvDispMode.mNowDisp;
+	}
+	
+	if( (gvDispMode.mNowDisp == ecDispMode_UpVerDwNon) ||
+		(gvDispMode.mNowDisp == ecDispMode_UpVerDwNon2) ||
+		(gvDispMode.mNowDisp == ecDispMode_Lock) ||
+		(gvDispMode.mNowDisp == ecDispMode_Lock2) )
+	{
+		gvModuleSts.mLcd = ecLcdModuleSts_Run;
+	}
+	else
+	{
+		gvModuleSts.mLcd = ecLcdModuleSts_Sleep;
+	}
+	
+	ApiLcd_Main();				/* LCDドライバーへ表示データを送信 */
+	
+	if( gvDispMode.mNowDisp == ecDispMode_UpErrDwRtc )
+	{
+		while( 1U )
+		{
+			M_STOP;
+		}
+	}
+}
+
+
+/*
+ *******************************************************************************
+ *	ディスプレイ表示処理
+ *
+ *	[内容]
+ *		ディスプレイへ出力する為の表示処理を行う。
+ *******************************************************************************
+ */
+static void SubHmi_Disp( void )
+{
+	uint8_t		wkRssi;
+	uint8_t		wkLoop;
+	uint8_t		wkU8;
+	uint16_t wkU16;
+	
+	ApiLcd_SegSelectOnOff( ecDispSegSelect_SegAllOff );
+	
+	switch( gvDispMode.mNowDisp )
+	{
+		/* 上段：Ver、下段：VerNo. */
+		case ecDispMode_UpVerDwNon:
+		case ecDispMode_UpVerDwNon2:
+		case ecDispMode_Ver:
+			wkU16 = cRomVer[ 0U ] * 100U;
+			wkU16 += cRomVer[ 1U ] * 10U + (sint16_t)cRomVer[ 2U ];
+			
+			ApiLcd_UppLow7SegDsp( "Ver", imHigh );
+			ApiLcd_Low7SegNumDsp( wkU16, imOFF );
+			
+			if( gvDispMode.mNowDisp == ecDispMode_Ver )
+			{
+				SubHmi_StsDsp();								/* ステータス表示 */
+			}
+			break;
+			
+		/* 上段:1ch、下段:時刻 */
+		case ecDispMode_Up1CHDwClk:
+#if (swSensorCom == imEnable)
+			if( gvInFlash.mProcess.mModelCode == 0xFFU )
+			{
+				ApiLcd_UppLow7SegDsp(" No", imHigh);
+				ApiLcd_UppLow7SegDsp("SEN", imLow);
+			}
+			else
+			{
+				SubHmi_DwTimeDsp();
+				
+				/* 測定時の一瞬消灯時に他の処理で点灯状態にしないための条件 */
+				if( gvModInf.mComSts == ecComSts_NullPre )
+				{
+					SubHmi_UpValDsp();
+				}
+			}
+#else
+			SubHmi_DwTimeDsp();
+			
+			/* 測定時の一瞬消灯時に他の処理で点灯状態にしないための条件 */
+			if( gvMeasPhase == ecMeasPhase_Init )
+			{
+				SubHmi_UpValDsp();
+			}
+#endif
+			SubHmi_StsDsp();									/* ステータス表示 */
+			SubHmi_AlmStsDsp();									/* 警報ステータス表示 */
+			break;
+			
+#if (swSensorCom == imEnable)
+		/* 上段:1ch、下段:2ch */
+		case ecDispMode_Up1CHDw2CH:
+			/* 測定時の一瞬消灯時に他の処理で点灯状態にしないための条件 */
+			if( gvModInf.mComSts == ecComSts_NullPre || gvModInf.mComSts == ecComSts_RcvWait )
+			{
+				SubHmi_UpValDsp();
+				SubHmi_DwValDsp();
+			}
+			SubHmi_StsDsp();									/* ステータス表示 */
+			SubHmi_AlmStsDsp();									/* 警報ステータス表示 */
+			break;
+			
+		/* 上段：なし、下段：接点情報 */
+		case ecDispMode_UpNonDwCon:
+			
+			switch( gvMeasPrm.mMeasVal[ 1U ] )
+			{
+				case imON:
+					ApiLcd_UppLow7SegDsp(" ON", imLow);
+					break;
+				case imOFF:
+					ApiLcd_UppLow7SegDsp("OFF", imLow);
+					break;
+				default:
+					ApiLcd_UppLow7SegDsp("---", imLow);
+			}
+			
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+		/* 上段:なし、下段:時刻 */
+		case ecDispMode_UpNonDwClk:
+			ApiLcd_UppLow7SegDsp("   ", imHigh);
+			SubHmi_DwTimeDsp();
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+#endif
+			
+		/* 上段:Err、下段:Rtc */
+		case ecDispMode_UpErrDwRtc:
+			ApiLcd_UppLow7SegDsp("Err", imHigh);
+			ApiLcd_UppLow7SegDsp("RTC", imLow);
+			break;
+			
+		/* 上段:Lock、下段:なし */
+		case ecDispMode_Lock:
+		case ecDispMode_Lock2:
+			ApiLcd_UppLow7SegDsp("LCK", imHigh);
+			ApiLcd_UppLow7SegDsp("   ", imLow);
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+			
+#if (swRssiLogDebug == imEnable)
+		/* 上段：CommTargetID、下段：RSSI */
+		case ecDispMode_UpComDwRssi:
+			ApiLcd_Upp7SegNumDsp( gvLcdComGwId, imOFF, imOFF);
+			ApiLcd_Low7SegNumDsp( gvDebugRssi, imOFF );
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+#endif
+			
+		/* 上段:'ch'、下段:高速通信ch(1,2,3) */
+		case ecDispMode_HsCh:
+			ApiLcd_UppLow7SegDsp(" ch", imHigh);
+			ApiLcd_Low7SegNumDsp(gvInFlash.mParam.mrfHsCh+1, imOFF);
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+			
+		/* 上段：' id’、下段：事業会社ID */
+		case ecDispMode_Appid:
+			ApiLcd_UppLow7SegDsp(" id", imHigh);
+			
+			wkU16 = gvInFlash.mParam.mAppID[ 0U ] << 8U;
+			wkU16 |= gvInFlash.mParam.mAppID[ 1U ];
+			wkU16 &= 0x0FFFU;
+			
+			if( wkU16 == 0x0FFFU )
+			{
+				ApiLcd_UppLow7SegDsp("---", imLow);
+			}
+			else if( wkU16 == 0x0FFEU )
+			{
+				ApiLcd_UppLow7SegDsp("LCL", imLow);
+			}
+			else
+			{
+			SubHmi_DwHexDsp( wkU16 );
+			}
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+		
+		/* 上段：'LEV’、下段：RSSI */
+		case ecDispMode_Rssi:
+			ApiLcd_UppLow7SegDsp("LEV", imHigh);
+			wkRssi = ApiRfDrv_GetRssi();
+			
+			/* 通信失敗中 */
+			if( wkRssi < 40U )
+			{
+				ApiLcd_UppLow7SegDsp("---", imLow);
+			}
+			/* 通常 */
+			else
+			{
+				for( wkLoop = 0U ; wkLoop < 4U ; wkLoop++ )
+				{
+					if( wkRssi >= cRssi[ wkLoop ] )
+					{
+						ApiLcd_Low7SegNumDsp( wkLoop + 1, imOFF );
+						break;
+					}
+				}
+			}
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+			
+		/* 上段：'con’、下段：GW ID */
+		case ecDispMode_Gwid:
+			ApiLcd_UppLow7SegDsp("con", imHigh);
+			if( gvLcdComGwId == 0U )
+			{
+				ApiLcd_UppLow7SegDsp("---", imLow);
+			}
+			else
+			{
+				SubHmi_DwHexDsp( gvLcdComGwId & 0x0FFFU );
+			}
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+			
+		/* 上段：'Err’、下段：エラーNo. */
+		case ecDispMode_AbnChkErr:
+			ApiLcd_UppLow7SegDsp( "Err", imHigh );
+			
+			wkU8 = ApiAbn_AbnNumGet();							/* 直近の機器異常No.取得 */
+			ApiLcd_Low7SegNumDsp( wkU8, imOFF );
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+			
+#if 0
+		/* 上段:アプリID、下段:グループID */
+		case ecDispMode_UpAppDwGr:
+			SubHmi_AppGrDsp();
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+#endif			
+#if (swKouteiMode == imEnable)
+		/* 全セグメント点灯 */
+		case ecDispMode_AllSegOn:
+			ApiLcd_SegSelectOnOff( ecDispSegSelect_SegAllOn );
+			break;
+			
+		/* 全セグメント消灯 */
+		case ecDispMode_AllSegOff:
+			ApiLcd_SegSelectOnOff( ecDispSegSelect_SegAllOff );
+			break;
+#endif
+#if (swKouteiMode == imEnable)
+		/* 奇数セグメント点灯 */
+		case ecDispMode_OddSeg:
+			ApiLcd_SegSelectOnOff( ecDispSegSelect_SegOddOn );
+			break;
+			
+		/* 偶数セグメント点灯 */
+		case ecDispMode_EvenSeg:
+			ApiLcd_SegSelectOnOff( ecDispSegSelect_SegEvenOn );
+			break;
+#endif
+#if 0
+		/* 上段:Pt、下段:なし */
+		case ecDispMode_UpPtDwNon:
+			ApiLcd_UppLow7SegDsp(" Pt", imHigh);
+			ApiLcd_UppLow7SegDsp("   ", imLow);
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+#endif
+#if (swRESFDisp == imEnable)
+		/* 上段:'rst'、下段:RESF */
+		case ecDispMode_Resf:
+			ApiLcd_UppLow7SegDsp("rst", imHigh);
+			ApiLcd_Low7SegNumDsp(gvResf, imOFF);
+			SubHmi_StsDsp();									/* ステータス表示 */
+			break;
+#endif
+		default:
+			/* 無処理 */
+			break;
+	}
+}
+
+
+/*
+ *******************************************************************************
+ *	上段測定値セット
+ *
+ *	[内容]
+ *		液晶上段に測定値をセットする
+ *******************************************************************************
+ */
+static void SubHmi_UpValDsp( void )
+{
+	sint16_t	wkMeasVal;						/* 測定値 */
+	uint8_t		wkErr;							/* 測定エラー */
+	
+	/* 測定値表示(上段) */
+	wkMeasVal = gvMeasPrm.mMeasVal[ 0U ];
+	wkErr = gvMeasPrm.mMeasError[ 0U ];
+	
+	if( wkErr & imBurnShort )
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imSnsrErr );	/* 上段側真ん中バー表示 */
+	}
+#if (swSensorCom == imEnable)
+	else if( (wkErr & imTmpUnder) || (wkMeasVal >= -2050 && wkMeasVal <= -2000) )
+#else
+	else if( wkErr & imTmpUnder )
+#endif
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imUnder );		/* 上段側アンダーフロー文字表示 */
+	}
+#if (swSensorCom == imEnable)
+	else if( (wkErr & imTmpOver) || (wkMeasVal >= 2000 && wkMeasVal <= 2050) )
+#else
+	else if( wkErr & imTmpOver )
+#endif
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imOver );		/* 上段側オーバーフロー文字表示 */
+	}
+#if (swSensorCom == imEnable)
+	else if( wkErr & imSnsError )				/* センサ機器異常 */
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imSnsrErr );	/* 下段側真ん中バー表示 */
+	}
+	else if( wkErr & imComTmpError )			/* センサ間通信異常 */
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imSnsrErr );	/* 上段側真ん中バー表示 */
+	}
+#endif
+	else
+	{
+		ApiLcd_Upp7SegNumDsp( wkMeasVal, imOFF, imON );
+	}
+	
+	ApiLcd_SegDsp(ecLcdSeg_S13, imON);		/* ℃点灯 */
+}
+
+/*
+ *******************************************************************************
+ *	上段測定値セット（電圧）
+ *
+ *	[内容]
+ *		液晶上段に測定値（一の位～小数点第一位まで）をセットする
+ *******************************************************************************
+ */
+static void SubHmi_UpValDsp_Vol( void )
+{
+	sint16_t	wkMeasVal;						/* 測定値 */
+	sint16_t	wkMeasValA;						/* 測定値変換用 */
+	uint8_t		wkErr;							/* 測定エラー */
+	
+	/* 測定値表示(上段) */
+//	wkMeasVal = 0x2134; 		/* 液晶表示テスト -500(-0.500) FE0C | -1(-0.001) FFFF */
+	wkMeasVal = gvMeasPrm.mMeasVal[ 0U ];
+	wkMeasValA = wkMeasVal;
+	wkMeasValA /= 100;							/* 一の位～小数点第一位まで取得 */
+	wkErr = gvMeasPrm.mMeasError[ 0U ];
+	
+	if( wkErr & imBurnShort )
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imSnsrErr );	/* 上段側真ん中バー表示 */
+	}
+	else if( wkErr & imTmpUnder )
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imUnder );		/* 上段側アンダーフロー文字表示 */
+	}
+	else if( wkErr & imTmpOver )
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imOver );		/* 上段側オーバーフロー文字表示 */
+	}
+#if (swSensorCom == imEnable)
+	else if( wkErr & imSnsError )				/* センサ機器異常 */
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imSnsrErr );	/* 下段側真ん中バー表示 */
+	}
+	#if 1 /* 電圧液晶表示テスト時は無効化する */
+	else if( wkErr & imComTmpError )			/* センサ間通信異常 */
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imSnsrErr );	/* 上段側真ん中バー表示 */
+	}
+	#endif
+#endif
+	else if(wkMeasVal < 0)
+	{
+		ApiLcd_Upp7SegNumDsp( wkMeasValA, imOFF, imON , imON );
+	}
+	else
+	{
+		ApiLcd_Upp7SegNumDsp( wkMeasValA, imOFF, imON , imOFF );
+	}
+	
+	//  ApiLcd_SegDsp(ecLcdSeg_S13, imON);		/* ℃点灯 */
+}
+
+
+/*
+ *******************************************************************************
+ *	上段測定値セット（パルス）
+ *
+ *	[内容]
+ *		液晶上段に測定値（3桁）をセットする
+ *******************************************************************************
+ */
+static void SubHmi_UpValDsp_Pulse( void )
+{
+	sint16_t	wkMeasVal;						/* 測定値 */
+	sint16_t	wkMeasValA;						/* 測定値変換用 */
+	uint8_t		wkErr;							/* 測定エラー */
+	
+	/* 測定値表示(上段) */
+//	wkMeasVal = 0x0; 		/* 液晶表示テスト */
+	wkMeasVal = gvMeasPrm.mMeasVal[ 0U ];
+	wkMeasValA = wkMeasVal;
+	if( wkMeasValA >= 1000)				/* 3桁(十～千の位)取得 */
+	{
+		wkMeasValA /= 10;
+	}										
+	/* 処理なし：3桁(一～百の位)取得 */
+	wkErr = gvMeasPrm.mMeasError[ 0U ];
+	
+	if( wkErr & imBurnShort )
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imSnsrErr );	/* 上段側真ん中バー表示 */
+	}
+	else if( wkErr & imTmpUnder )
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imUnder );		/* 上段側アンダーフロー文字表示 */
+	}
+	else if( wkErr & imTmpOver )
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imOver );		/* 上段側オーバーフロー文字表示 */
+	}
+#if (swSensorCom == imEnable)
+	else if( wkErr & imSnsError )				/* センサ機器異常 */
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imSnsrErr );	/* 下段側真ん中バー表示 */
+	}
+	#if 1	/* パルス液晶表示テスト時は無効化する */
+	else if( wkErr & imComTmpError )			/* センサ間通信異常 */
+	{
+		ApiLcd_Upp7SegOvrUdrDsp( imSnsrErr );	/* 上段側真ん中バー表示 */
+	}
+	#endif
+#endif
+	else
+	{
+		ApiLcd_Upp7SegNumDsp( wkMeasValA, imOFF, imOFF, imOFF);
+	}
+	
+	//  ApiLcd_SegDsp(ecLcdSeg_S13, imON);		/* ℃点灯 */
+}
+
+#if 0
+/*
+ *******************************************************************************
+ *	上段Ver.セット
+ *
+ *	[内容]
+ *		液晶上段にVer.をセットする
+ *******************************************************************************
+ */
+static void SubHmi_UpVerDsp( void )
+{
+	sint16_t	wkVer;
+	
+	/* Ver.表示(上段) */
+	wkVer = (sint16_t)cRomVer[ 0U ] * 100U;
+	wkVer += (sint16_t)cRomVer[ 1U ] * 10U + (sint16_t)cRomVer[ 2U ];
+//	wkVer += (sint16_t)cRomVer[ 2U ];
+	
+	ApiLcd_UppLow7SegDsp("Ver", imLow);
+	ApiLcd_Upp7SegNumDsp( wkVer, imON, imOFF );
+
+}
+#endif
+
+#if (swSensorCom == imEnable)
+/*
+ *******************************************************************************
+ *	下段測定値セット
+ *
+ *	[内容]
+ *		液晶下段に測定値をセットする
+ *******************************************************************************
+ */
+static void SubHmi_DwValDsp( void )
+{
+	sint16_t	wkMeasVal;						/* 測定値 */
+	uint8_t		wkErr;							/* 測定エラー */
+	
+	/* 測定値表示(下段) */
+	wkMeasVal = gvMeasPrm.mMeasVal[ 1U ];
+	wkErr = gvMeasPrm.mMeasError[ 1U ];
+	
+	if( wkErr & imBurnShort )
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imSnsrErr );	/* 下段側真ん中バー表示 */
+	}
+	else if( wkErr & imTmpUnder )
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imUnder );		/* 下段側アンダーフロー文字表示 */
+	}
+	else if( wkErr & imTmpOver )
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imOver );		/* 下段側オーバーフロー文字表示 */
+	}
+#if (swSensorCom == imEnable)
+	else if( wkErr & imSnsError )				/* センサ機器異常 */
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imSnsrErr );	/* 下段側真ん中バー表示 */
+	}
+	else if( wkErr & imComTmpError )			/* センサ間通信異常 */
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imSnsrErr );	/* 下段側真ん中バー表示 */
+	}
+#endif
+	else
+	{
+		ApiLcd_Low7SegNumDsp( wkMeasVal, imON );
+	}
+	
+	if( gvInFlash.mProcess.mModelCode == ecSensType_HumTmp )
+	{
+		ApiLcd_SegDsp(ecLcdSeg_S22, imON);		/* %点灯 */
+	}
+}
+#endif
+
+/*
+ *******************************************************************************
+ *	下段測定値セット(電圧)
+ *
+ *	[内容]
+ *		液晶下段に測定値（小数点第二～三位）の2桁をセットする
+ *******************************************************************************
+ */
+static void SubHmi_DwValDsp_Vol( void )
+{
+	sint16_t	wkMeasVal;						/* 測定値 */
+	sint16_t	wkMeasValA;						/* 測定値変換用 */
+	uint8_t		wkErr;							/* 測定エラー */
+	
+	/* 測定値表示(下段) */
+//	wkMeasVal = 0x2134; 		/* 液晶表示テスト -500(-0.500) FE0C | -1(-0.001) FFFF */
+	wkMeasVal = gvMeasPrm.mMeasVal[ 0U ];
+	wkMeasValA = wkMeasVal;
+	wkMeasValA %= 100;							/* 小数点第二～三位(2桁)を取得 */
+	wkMeasValA *= 10;							/* 1桁繰り上げる */
+	wkErr = gvMeasPrm.mMeasError[ 0U ];
+	
+	if( wkErr & imBurnShort )
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imSnsrErr );	/* 上段側真ん中バー表示 */
+	}
+	else if( wkErr & imTmpUnder )
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imUnder );		/* 上段側アンダーフロー文字表示 */
+	}
+	else if( wkErr & imTmpOver )
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imOver );		/* 上段側オーバーフロー文字表示 */
+	}
+#if (swSensorCom == imEnable)
+	else if( wkErr & imSnsError )				/* センサ機器異常 */
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imSnsrErr );	/* 下段側真ん中バー表示 */
+	}
+	#if 1 /* 電圧液晶表示テスト時は無効化する */
+	else if( wkErr & imComTmpError )			/* センサ間通信異常 */
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imSnsrErr );	/* 上段側真ん中バー表示 */
+	}
+	#endif
+#endif
+	else
+	{
+		ApiLcd_Low7SegVPDsp( wkMeasValA, imOFF );
+	}
+}
+
+/*
+ *******************************************************************************
+ *	下段測定値セット(パルス)
+ *
+ *	[内容]
+ *		液晶下段に「千の位が0ではないとき」、測定値（一の位）をセットする
+ *******************************************************************************
+ */
+static void SubHmi_DwValDsp_Pulse( void )
+{
+	sint16_t	wkMeasVal;						/* 測定値 */
+	sint16_t	wkMeasValA;						/* 測定値変換用 */
+	uint8_t		wkErr;							/* 測定エラー */
+	
+	/* 測定値表示(下段) */
+//	wkMeasVal = 0x0; 		/* 液晶表示テスト */
+	wkMeasVal = gvMeasPrm.mMeasVal[ 0U ];
+	wkMeasValA = wkMeasVal;
+
+	if(	wkMeasValA > 999 )	/* パルスが1000以上のとき「下段の3桁目」に「1の位」の値を表示 */
+	{
+		wkMeasValA %= 10;							/* 一の位を取得 */
+		wkMeasValA *= 100;							/* 3桁目に押し上げる */ 
+	}
+	else
+	{
+		wkMeasValA = 0;								/* 測定値が1000未満のとき、下段に数値は非表示 */
+	}
+	wkErr = gvMeasPrm.mMeasError[ 0U ];
+	
+	if( wkErr & imBurnShort )
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imSnsrErr );	/* 上段側真ん中バー表示 */
+	}
+	else if( wkErr & imTmpUnder )
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imUnder );		/* 上段側アンダーフロー文字表示 */
+	}
+	else if( wkErr & imTmpOver )
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imOver );		/* 上段側オーバーフロー文字表示 */
+	}
+#if (swSensorCom == imEnable)
+	else if( wkErr & imSnsError )				/* センサ機器異常 */
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imSnsrErr );	/* 下段側真ん中バー表示 */
+	}
+	#if 1 /* パルス液晶表示テスト時は無効化する */
+	else if( wkErr & imComTmpError )			/* センサ間通信異常 */
+	{
+		ApiLcd_Low7SegOvrUdrDsp( imSnsrErr );	/* 上段側真ん中バー表示 */
+	}
+	#endif
+#endif
+	else if( wkMeasVal / 1000 > 0 )
+	{
+		ApiLcd_Low7SegVPDsp( wkMeasValA, imON );
+	}
+	else
+	{
+		ApiLcd_Low7SegVPDsp( wkMeasValA, imOFF );
+	}
+}
+
+
+/*
+ *******************************************************************************
+ *	下段Hexデータセット
+ *
+ *	[内容]
+ *		液晶下段にHexデータをセットする
+ *******************************************************************************
+ */
+static void SubHmi_DwHexDsp( uint16_t arVal )
+{
+	uint8_t		wkLoop;
+	char_t		wkHex[ 3U ];
+	uint16_t	wkU16;
+	
+	for( wkLoop = 0U ; wkLoop < 3U ; wkLoop++ )
+	{
+		wkU16 = arVal >> (8U - wkLoop * 4U);
+		wkU16 &= 0x000FU;
+		wkHex[ wkLoop ] = cHexVal[ wkU16 ];
+	}
+	ApiLcd_UppLow7SegDsp( wkHex, imLow );
+}
+
+
+#if 0
+/*
+ *******************************************************************************
+ *	上段アプリID、下段グループIDセット
+ *
+ *	[内容]
+ *		液晶上段にアプリID(16進数)、下段にグループID(10進数)をセットする
+ *******************************************************************************
+ */
+static void SubHmi_AppGrDsp( void )
+{
+	uint16_t	wkAppId;		/* アプリID */
+	sint16_t	wkGrId;			/* グループID */
+	uint16_t	wkVal;
+	char_t		wkHex[ 3U ];
+	uint8_t		wkLoop;
+	
+	/* アプリID表示(上段) */
+	wkAppId = gvInFlash.mParam.mAppID[ 0U ] << 8U;
+	wkAppId |= gvInFlash.mParam.mAppID[ 1U ];
+	wkAppId &= 0x0FFFU;
+	
+	for( wkLoop = 0U ; wkLoop < 3U ; wkLoop++ )
+	{
+		wkVal = wkAppId >> (8U - wkLoop * 4U);
+		wkVal &= 0x000FU;
+		wkHex[ wkLoop ] = cHexVal[ wkVal ];
+	}
+	
+	ApiLcd_UppLow7SegDsp( wkHex, imHigh );
+	
+	
+	/* グループID表示(下段) */
+	wkGrId = (sint16_t)gvInFlash.mParam.mGroupID;
+	ApiLcd_Low7SegNumDsp( wkGrId, imOFF );
+
+}
+#endif
+
+
+/*
+ *******************************************************************************
+ *	下段時刻セット
+ *
+ *	[内容]
+ *		液晶下段に時刻をセットする
+ *******************************************************************************
+ */
+static void SubHmi_DwTimeDsp( void )
+{
+	ST_RTC_t	wkClock;
+	
+	switch( gvRtcSts )
+	{
+		/* 内蔵RTCが遅れている:徐々に進む時刻を表示 */
+		case ecRtcSts_Delay:
+		/* 内蔵RTCが進んでいる:進んでいた時刻を表示 */
+		case ecRtcSts_Fast:
+			wkClock = ApiRtcDrv_localtime( gvLocalTime );
+			break;
+			
+		/* 通常 */
+		case ecRtcSts_Non:
+		default:
+			wkClock = gvClock;
+			break;
+	}
+	ApiLcd_TimeDsp( wkClock.mHour, wkClock.mMin );			/* 下段側時計表示 */
+}
+
+
+/*
+ *******************************************************************************
+ *	ステータスセット
+ *
+ *	[内容]
+ *		ステータスをセットする
+ *******************************************************************************
+ */
+static void SubHmi_StsDsp( void )
+{
+	/* 電池残量表示 */
+	switch( gvBatAd.mBattSts )
+	{
+		case ecBattSts_H:
+			ApiLcd_SegDsp(ecLcdSeg_T10, imON);
+		case ecBattSts_M:
+			ApiLcd_SegDsp(ecLcdSeg_T9, imON);
+		case ecBattSts_L:
+			ApiLcd_SegDsp(ecLcdSeg_T8, imON);
+		case ecBattSts_Empty:
+		case ecBattSts_Non:
+		default:
+			ApiLcd_SegDsp(ecLcdSeg_T11, imON);
+			break;
+		case ecBattSts_Init:
+			break;
+	}
+	
+	/* EVENT */
+	if( gvInFlash.mParam.mEventKeyFlg == imON )
+	{
+		ApiLcd_SegDsp(ecLcdSeg_S4, imON);
+	}
+	else
+	{
+		ApiLcd_SegDsp(ecLcdSeg_S4, imOFF);
+	}
+	
+	/* ONLINE */
+	if( ApiRfDrv_GetRtConInfo() )
+	{
+		ApiLcd_SegDsp(ecLcdSeg_S2, imON);
+	}
+	else
+	{
+		ApiLcd_SegDsp(ecLcdSeg_S2, imOFF);
+	}
+	
+	/* COLLECT */ 
+	if( ApiRfDrv_HsStsDisp( 3U ) )
+	{
+		ApiLcd_SegDsp(ecLcdSeg_S3, imON);
+	}
+	else
+	{
+		ApiLcd_SegDsp(ecLcdSeg_S3, imOFF);
+	}
+	
+	/* RF OFF */
+	if( ApiRfDrv_RtStbyOnOff( 0U ) == 0xFFFF )
+	{
+		ApiLcd_SegDsp(ecLcdSeg_S1, imON);
+	}
+	else
+	{
+		ApiLcd_SegDsp(ecLcdSeg_S1, imOFF);
+	}
+	
+	SubHmi_BellMarkSetDsp();							/* ベルマーク表示 */
+}
+
+
+/*
+ *******************************************************************************
+ *	警報ステータスセット
+ *
+ *	[内容]
+ *		警報ステータスをセットする
+ *******************************************************************************
+ */
+static void SubHmi_AlmStsDsp( void )
+{
+	uint8_t			wkChannel;
+	ET_LcdSeg_t		wkSegH_L;
+	ET_LcdSeg_t		wkSegH_R;
+	ET_LcdSeg_t		wkSegL_L;
+	ET_LcdSeg_t		wkSegL_R;
+	ET_LcdSeg_t		wkSegBell = ecLcdSeg_S1;
+	
+	
+	for( wkChannel = 0U ; wkChannel < imChannelNum ; wkChannel++ )
+	{
+		if( wkChannel == 0U )
+		{
+			/* 上段警報ステータス */
+			if( (gvDispMode.mNowDisp == ecDispMode_Up1CHDwClk) ||
+				(gvDispMode.mNowDisp == ecDispMode_Up1CHDw2CH) ||
+				(gvDispMode.mNowDisp == ecDispMode_Up1CHDw3CH) )
+			{
+				wkSegBell = ecLcdSeg_S7;
+				wkSegH_L = ecLcdSeg_S8;
+				wkSegH_R = ecLcdSeg_S9;
+				wkSegL_L = ecLcdSeg_S10;
+				wkSegL_R = ecLcdSeg_S11;
+			}
+		}
+		else
+		{
+			/* 下段警報ステータス */
+			if( (gvDispMode.mNowDisp == ecDispMode_UpNonDw2CH) ||
+				(gvDispMode.mNowDisp == ecDispMode_Up1CHDw2CH) ||
+				(gvDispMode.mNowDisp == ecDispMode_UpNonDw3CH) ||
+				(gvDispMode.mNowDisp == ecDispMode_Up1CHDw3CH) )
+			{
+				wkSegBell = ecLcdSeg_S17;
+				wkSegH_L = ecLcdSeg_S18;
+				wkSegH_R = ecLcdSeg_S19;
+				wkSegL_L = ecLcdSeg_S20;
+				wkSegL_R = ecLcdSeg_S21;
+			}
+		}
+		
+		if( wkSegBell != 0U )
+		{
+			/* LCDアラームステータスセット */
+			
+			/* 上上限警報 */
+			if( ecAlmSts_ActDelayCnt == gvAlmSts[ wkChannel ][ ecAlmKind_HH ] )
+//					ecAlmSts_ActDevTime == gvAlmSts[ wkChannel ][ ecAlmKind_HH ]
+			{
+				ApiLcd_SegDsp( wkSegH_L, imON );
+				ApiLcd_SegDsp( wkSegH_R, imON );
+				ApiLcd_SegDsp( wkSegBell, imON );
+			}
+			/* 上限警報 */
+			else if( ecAlmSts_ActDelayCnt == gvAlmSts[ wkChannel ][ ecAlmKind_H ] )
+//					ecAlmSts_ActDevTime == gvAlmSts[ wkChannel ][ ecAlmKind_H ]
+			{
+				ApiLcd_SegDsp( wkSegH_R, imON );
+				ApiLcd_SegDsp( wkSegBell, imON );
+			}
+			
+			
+			/* 下下限警報 */
+			if( ecAlmSts_ActDelayCnt == gvAlmSts[ wkChannel ][ ecAlmKind_LL ] )
+//					ecAlmSts_ActDevTime == gvAlmSts[ wkChannel ][ ecAlmKind_LL ]
+			{
+				ApiLcd_SegDsp( wkSegL_L, imON );
+				ApiLcd_SegDsp( wkSegL_R, imON );
+				ApiLcd_SegDsp( wkSegBell, imON );
+			}
+			/* 下限警報 */
+			else if( ecAlmSts_ActDelayCnt == gvAlmSts[ wkChannel ][ ecAlmKind_L ] )
+//				ecAlmSts_ActDevTime == gvAlmSts[ wkChannel ][ ecAlmKind_L ]
+			{
+				ApiLcd_SegDsp( wkSegL_R, imON );
+				ApiLcd_SegDsp( wkSegBell, imON );
+			}
+		}
+	}
+}
+
+
+/*
+ *******************************************************************************
+ *	ベルマークセット
+ *
+ *	[内容]
+ *		機器異常、計測警報(バーン、オーバー含む)
+ *		復帰しても点灯状態を継続
+ *		DISPキー押下で、該当のアラーム全てが復帰状態なら消灯
+ *******************************************************************************
+ */
+static void SubHmi_BellMarkSetDsp( void )
+{
+#if (swSensorCom == imEnable)
+	uint8_t		wkLoop;
+	uint8_t		wkAlmNum;
+	uint8_t		wkCh;
+	
+	
+	if( gvInFlash.mProcess.mModelCode == ecSensType_HumTmp )
+	{
+		wkCh = 2U;
+	}
+	else
+	{
+		wkCh = 1U;
+	}
+	
+	for( wkLoop = 0U ; wkLoop < wkCh ; wkLoop++ )
+	{
+		/* ベルマークフラグがOFFの場合 */
+		if( vBellMarkSetFlg[ wkLoop ] == imOFF )
+		{
+			/* 機器異常(電池空:bit0、電池残量低下:bit12除く) */
+			if( gvInFlash.mData.mAbnInf_Sts & 0x0FFE )
+			{
+				vBellMarkSetFlg[ 0U ] = imON;				/* ベルマークフラグセット */
+			}
+			
+			/* 測定エラー(バーン、ショート、オーバー、アンダー、センサエラー) */
+			if( gvMeasPrm.mMeasError[ wkLoop ] & imOvUnBrnShrtComSns )
+			{
+				vBellMarkSetFlg[ wkLoop ] = imON;			/* ベルマークフラグセット */
+			}
+			
+			/* 計測警報(UU/U/L/LL) */
+			for( wkAlmNum = 0U ; wkAlmNum < imAllAlmNum ; wkAlmNum++ )
+			{
+				if( gvAlmSts[ wkLoop ][ wkAlmNum ] == ecAlmSts_ActDelayCnt )
+				{
+					vBellMarkSetFlg[ wkLoop ] = imON;		/* ベルマークフラグセット */
+				}
+			}
+		}
+	}
+	
+	/* 測定値表示のとき */
+	if( gvDispMode.mNowDisp == ecDispMode_Up1CHDwClk ||
+		gvDispMode.mNowDisp == ecDispMode_Up1CHDw2CH )
+	{
+		if( vBellMarkSetFlg[ 0U ] == imON )
+		{
+			ApiLcd_SegDsp(ecLcdSeg_S7, imON);				/* ベルマーク点灯 */
+		}
+		if( vBellMarkSetFlg[ 1U ] == imON )
+		{
+			ApiLcd_SegDsp(ecLcdSeg_S17, imON);				/* ベルマーク点灯 */
+		}
+	}
+#else
+	uint8_t		wkLoop;
+	uint8_t		wkAlmNum;
+	
+	if( vBellMarkSetFlg == imOFF )					/* ベルマークフラグがOFFの場合 */
+	{
+		/* 機器異常(電池空:bit0、電池残量低下:bit12除く) */
+		if( gvInFlash.mData.mAbnInf_Sts & 0x0FFE )
+		{
+			vBellMarkSetFlg = imON;					/* ベルマークフラグセット */
+		}
+		
+		/* 測定エラー(バーン、ショート、オーバー、アンダー) */
+		for( wkLoop = 0U ; wkLoop < imMeasChNum ; wkLoop++ )
+		{
+			if( gvMeasPrm.mMeasError[ wkLoop ] & imOvUnBrnShrt )
+			{
+				vBellMarkSetFlg = imON;				/* ベルマークフラグセット */
+			}
+		}
+		
+		/* 計測警報 */
+		for( wkLoop = 0U ; wkLoop < imChannelNum ; wkLoop++ )
+		{
+			for( wkAlmNum = 0U ; wkAlmNum < imAllAlmNum ; wkAlmNum++ )
+			{
+				if( gvAlmSts[ wkLoop ][ wkAlmNum ] == ecAlmSts_ActDelayCnt )
+				{
+					vBellMarkSetFlg = imON;			/* ベルマークフラグセット */
+				}
+			}
+		}
+	}
+	
+	if( vBellMarkSetFlg == imON )
+	{
+		if( gvDispMode.mNowDisp == ecDispMode_Up1CHDwClk )
+		{
+			ApiLcd_SegDsp(ecLcdSeg_S7, imON);		/* ベルマーク点灯 */
+		}
+	}
+#endif
+}
+
+
+/*
+ *******************************************************************************
+ *	ベルマークフラグクリア
+ *
+ *	[内容]
+ *		ベルマークフラグをクリアする
+ *	[引数]
+ *		なし
+ *	[戻値]
+ *		uint8_t arRet: imON:ベルマーククリアあり、imOFF：ベルマーククリアなし
+ *******************************************************************************
+ */
+uint8_t ApiHmi_BellMarkClrDsp( void )
+{
+	uint8_t arRet = imOFF;
+	
+#if (swSensorCom == imEnable)
+	if( vBellMarkSetFlg[ 0U ] == imON || vBellMarkSetFlg[ 1U ] == imON )
+	{
+		vBellMarkSetFlg[ 0U ] = imOFF;				/* ベルマークフラグクリア */
+		vBellMarkSetFlg[ 1U ] = imOFF;				/* ベルマークフラグクリア */
+		
+		SubHmi_BellMarkSetDsp();					/* ベルマーク更新 */
+		
+		if( vBellMarkSetFlg[ 0U ] == imOFF && vBellMarkSetFlg[ 1U ] == imOFF )
+		{
+			arRet = imON;
+		}
+	}
+#else
+	if( vBellMarkSetFlg == imON )
+	{
+		vBellMarkSetFlg = imOFF;							/* ベルマークフラグクリア */
+		
+		SubHmi_BellMarkSetDsp();							/* ベルマーク更新 */
+		
+		if( vBellMarkSetFlg == imOFF )
+		{
+			arRet = imON;
+		}
+	}
+#endif	
+	return arRet;
+}
+
+
+#pragma section

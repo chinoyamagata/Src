@@ -1,0 +1,359 @@
+/*
+ *******************************************************************************
+ *	File name	:	immediate.h
+ *
+ *	[内容]
+ *		immediate定数定義
+ *------------------------------------------------------------------------------
+ *	[変更日]		[変更者]		[概要]
+ *	2017.11.08
+ *******************************************************************************
+ */
+#ifndef	INCLUDED_IMMEDIATE_H
+#define	INCLUDED_IMMEDIATE_H
+
+#include "switch.h"
+
+
+/*
+ ***************************************
+ *	一般
+ ***************************************
+ */
+#define	imOFF				0U													/* OFF */
+#define	imON				1U													/* ON */
+
+#define	imLow				0U													/* Low */
+#define	imHigh				1U													/* High */
+
+#define	imDisable			0U													/* 禁止 */
+#define	imEnable			1U													/* 許可 */
+
+#define	imNASI				0U													/* 無し */
+#define	imARI				1U													/* 有り */
+
+#define	imUnUsed			0U													/* 未使用 */
+#define	imUse				1U													/* 使用 */
+
+#define	imIoOut				0U					/* ポート出力 */
+#define	imIoIn				1U					/* ポート入力 */
+
+#define	imRtcWrFirstVal		0xA5U				/* 外付けRTC初アクセスフラグ */
+
+/*
+ ***************************************
+ *	内部Flash mParmFlg(パラメータフラグ管理)
+ ***************************************
+ */
+#define imFactoryInitFlg	M_BIT0				/* Hiで工場出荷初期化実行 */
+#define imRtStbyOffFlg		M_BIT1				/* HiならHSのみ待受状態、LoならHS-Rt待受状態 */
+
+/*
+ ***************************************
+ *	電池電圧
+ ***************************************
+ */
+#define	imAdCnt_1600mV		174U				/* 1600mVのADカウント値 */
+#define	imAdCnt_1800mV		196U				/* 1800mVのADカウント値 */
+#define	imAdCnt_1820mV		198U				/* 1820mVのADカウント値 */
+#define	imAdCnt_2300mV		251U				/* 2300mVのADカウント値 */
+
+/*
+ ***************************************
+ *	LCD
+ ***************************************
+ */
+#define	imUnder				0U
+#define	imOver				1U
+#define	imSnsrErr			2U
+#define	imBar				3U
+
+/*
+ ***************************************
+ *	キー関連
+ ***************************************
+ */
+#define	imKeyChatCnt		4U					/* チャタリング測定：5msec*4cnt連続 */
+#define	imKey1secPress		200U				/* 1秒長押し測定カウント：5ms*200cnt=1000ms */
+
+#define	KEY_EVENT		(P7_bit.no4)
+#define	KEY_DISP		(P7_bit.no5)
+#define	KEY_RESET		(P13_bit.no7)
+
+/*
+ ***************************************
+ *	タイマ7
+ ***************************************
+ */
+#define	imTimer07_05msec	0x00BA
+#define imTimer07_1msec		0x0176
+#define	imTimer07_5300usec	0x07C2
+#define	imTimer07_10msec	0x0EA5
+#define	imTimer07_40msec	0x3A97
+
+/*
+ ***************************************
+ *	MODBUS通信
+ ***************************************
+ */
+#define	imMod_RxBufSize		30U				/* Modbus受信サイズ */
+#define	imMod_TxBufSize		30U				/* Modbus送信サイズ */
+
+#define	imProcessModeCode	0xC3A5U
+
+
+/*
+ ***************************************
+ *	外付けフラッシュメモリ
+ ***************************************
+ */
+/* ステータスレジスタ1 */
+#define	imFlashDrv_Sts1Bit_BUSY		M_BIT0										/* ERASE/WRITE IN PROGRESS */
+#define	imFlashDrv_Sts1Bit_WEL		M_BIT1										/* WRITE ENABLE LATCH */
+#define	imFlashDrv_Sts1Bit_BP0		M_BIT2										/* BLOCK PROTECT BIT0 */
+#define	imFlashDrv_Sts1Bit_BP1		M_BIT3										/* BLOCK PROTECT BIT1 */
+#define	imFlashDrv_Sts1Bit_BP2		M_BIT4										/* BLOCK PROTECT BIT2 */
+#define	imFlashDrv_Sts1Bit_TB		M_BIT5										/* TOP/BOTTOM PROTECT */
+#define	imFlashDrv_Sts1Bit_SEC		M_BIT6										/* SECTOR PROTECT */
+#define	imFlashDrv_Sts1Bit_SRP0		M_BIT7										/* WRITE ENABLE LATCH */
+
+#define	imOddExFlashFlg			0xA5U											/* 不良セクタ管理テーブルフラグ */
+
+/* IndexNo.最大値 */
+#define imIndexMaxErrInf	65500U					/* 異常情報 */
+#define imIndexMaxMeasAlm	65500U					/* 計測警報 */
+#define imIndexMaxMeas1		53196U					/* 計測値1 */
+#define imIndexMaxMeas2		65472U					/* 計測値2 */
+#define imIndexMaxEvt		65400U					/* イベント */
+#define imIndexMaxActLog	65250U				/* 動作履歴 */
+#define imIndexMaxSysLog	65024U					/* システムログ */
+
+/* 収録データのMAX数 */
+#define	imDataNumErrInf			500U				/* 異常情報 */
+#define	imDataNumMeasAlm		500U				/* 計測警報 */
+#define	imDataNumMeas1			53000U				/* 計測値1 */
+#define	imDataNumMeas2			1000U				/* 計測値2 */
+#define	imDataNumEvt			300U				/* イベント */
+#define	imDataNumActLog			450U				/* 動作履歴 */
+#define	imDataNumSysLog			2000U				/* システムログ */
+#define	imDataNumAdrTbl			1536U				/* アドレス特定テーブル */
+
+
+/*
+ ***************************************
+ *	チャンネル
+ ***************************************
+ */
+#define imChannelNum	4U							/* チャンネル個数 */
+#define imFlashQue_ChannelNum	3U					/* Flash保存チャンネル個数 */
+#define imMeasChNum		3U							/* 測定処理のチャネル個数 */
+
+/*
+ ***************************************
+ *	測定
+ ***************************************
+ */
+/* 測定異常 */
+#define imNonError		0x00U													/* エラーなし */
+#define imTmpOver		M_BIT0													/* オーバーレンジ */
+#define imTmpUnder		M_BIT1													/* アンダーレンジ */
+#define imRefBurnError	M_BIT2													/* リファレンス抵抗バーンアウト */
+#define imThBurnError	M_BIT3													/* サーミスタバーンアウト */
+#define imPtBurnError	M_BIT3													/* Ptバーンアウト */
+#define imRefShortError	M_BIT4													/* リファレンス抵抗ショート */
+#define imThShortError	M_BIT5													/* サーミスタショート */
+#if (swSensorCom == imEnable)
+#define imComTmpError	M_BIT6													/* センサ間通信エラー */
+#define imSnsError		M_BIT7													/* センサ機器異常 */
+#endif
+#define imBurnShort			0x3CU												/* バーンアウト、ショートマスク */
+#define imBurnShortComSns	0xFCU												/* バーンアウト、ショートマスク、センサエラー */
+#define imTmpOverUnder		0x03U												/* オーバーレンジ、アンダーレンジマスク */
+#define imOvUnBrnShrt		0x3FU												/* オーバーレンジ、アンダーレンジ、バーンアウト、ショートマスク */
+#define imOvUnBrnShrtComSns	0xFFU												/* オーバーレンジ、アンダーレンジ、バーンアウト、ショート、センサエラーマスク */
+
+
+/* 表示範囲（レンジに関係） */
+#define	imTmpDw_InThModel		-300		/* 内蔵サーミスタ：-30.0℃ */
+#define	imTmpUp_InThModel		550			/* 55.0℃ */
+#define	imTmpDw_ExThModel		-500		/* 外付けサーミスタ：-50.0℃ */
+#define	imTmpUp_ExThModel		700			/* 70.0℃ */
+
+#define	imTMPDw_PtModel			-2050		/* 温度下限値_-205.0℃ */
+#define	imTMPUp_PtModel			2050		/* 温度上限値_205.0℃ */
+#define	imHUMDw_HumTmpModel		0			/* 湿度値最小値_0.0%rh */
+#define	imHUMUp_HumTmpModel		1000		/* 湿度値最大値_100.0%rh */
+#define	imTMPDw_HumTmpModel		-250		/* 温度下限値_-25.0℃ */
+#define	imTMPUp_HumTmpModel		650			/* 温度上限値_65.0℃ */
+
+/* Pt測定異常 */
+#define	imComBurn_PtModel		32766		/* バーンアウト */
+#define	imComUp_PtModel			32767		/* 上限オーバー */
+#define	imComDw_PtModel			-32767		/* 下限オーバー */
+#define	imComHard_PtModel		-32765		/* ハード異常 */
+
+/* 温湿度測定異常 */
+#define	imComUp_HumTmpModel		32767		/* 温度測定で上限オーバー */
+#define	imComDw_HumTmpModel		-32767		/* 温度測定で下限オーバー */
+#define	imComDummy_HumTmpModel	-32765		/* 湿度測定で無効値 */
+
+/* 警報設定範囲 */
+#define	imAlmValDw_InThModel	-250		/* 内蔵サーミスタ：-25.0℃ */
+#define	imAlmValUp_InThModel	500			/* 50.0℃ */
+#define	imAlmValDw_ExThModel	-400		/* 外付けサーミスタ：-40.0℃ */
+#define	imAlmValUp_ExThModel	600			/* 60.0℃ */
+
+#define	imAlmValDw_PtModel		-1999		/* Pt_-199.9℃ */
+#define	imAlmValUp_PtModel		1999		/* 199.9℃ */
+#define	imAlmValDw_HumTmpModel_Tmp	-200	/* 温湿度：-20.0℃ */
+#define	imAlmValUp_HumTmpModel_Tmp	600		/* 60.0℃ */
+#define	imAlmValDw_HumTmpModel_Hum	0		/* 温湿度：0.0%RH */
+#define	imAlmValUp_HumTmpModel_Hum	1000	/* 100.0%RH */
+
+
+/* 測定値プラスオフセット */
+#define imSndTmpOffset		2100
+
+/* 警報値プラスオフセット */
+#define imSndAlmOffset		2160
+
+
+/* 送信測定値エラー情報 */
+#define imSndTmpInit		-2100				/* -2100:初期値 */
+#define imSndTmpBurn		-2099				/* -2099:バーンアウト */
+#define imSndTmpShort		-2098				/* -2098:ショート */
+#define imSndTmpOver		-2097				/* -2097:オーバーレンジ */
+#define imSndTmpUnder		-2096				/* -2096:アンダーレンジ */
+#define imSndSnsErr			-2093				/* -2093:センサエラー */
+
+
+/*
+ ***************************************
+ *	警報
+ ***************************************
+ */
+#define imAllAlmNum		4U					/* 全警報数(UU/U/L/LL) */
+
+
+/* 逸脱・警報発生ビット管理 */
+#define imAlmFlgLL	M_BIT0						/* 0bit:下下限 */
+#define imAlmFlgL	M_BIT1						/* 1bit:下限 */
+#define imAlmFlgH	M_BIT2						/* 2bit:上限 */
+#define imAlmFlgHH	M_BIT3						/* 3bit:上上限 */
+#define imAlmFlgMsk	0x0FU						/* フラグマスク */
+
+
+/* 警報逸脱クリア契機 */
+//#define	imAlmClrPoint_Time		M_BIT0
+//#define	imAlmClrPoint_FlgCng	M_BIT1
+
+
+/*
+ ***************************************
+ *	機器異常
+ ***************************************
+ */
+/* 異常情報 */
+#define	imAbnSts_BatEmpty	M_BIT0				/* 0bit:電池残量空 */
+#define	imAbnSts_RF			M_BIT1				/* 1bit:無線IC故障 */
+#define	imAbnSts_Dummy2		M_BIT2				/* 2bit:未使用 */
+#define	imAbnSts_PMEM		M_BIT3				/* 3bit:プライマリメモリ故障 */
+#define	imAbnSts_SMEM		M_BIT4				/* 4bit:セカンダリメモリ故障 */
+#define	imAbnSts_ROM		M_BIT5				/* 5bit:ROM故障 */
+#define	imAbnSts_Dummy3		M_BIT6				/* 6bit:未使用 */
+#define	imAbnSts_CLK		M_BIT7				/* 7bit:クロック故障 */
+#define	imAbnSts_KEY		M_BIT8				/* 8bit:キー故障 */
+#define	imAbnSts_RTC		M_BIT9				/* 9bit:外付けRTC故障 */
+#define	imAbnSts_INFLSH		M_BIT10				/* 10bit:内蔵Flash故障 */
+#define	imAbnSts_INRTC		M_BIT11				/* 11bit:内蔵RTC故障 */
+#define	imAbnSts_BatLow		M_BIT12				/* 12bit:電池残量低下 */
+
+
+/* 測定系異常情報 */
+#define	imAbnSts_OvRngCh1	M_BIT0				/* 0bit:オーバーレンジCH1 */
+#define	imAbnSts_OvRngCh2	M_BIT1				/* 1bit:オーバーレンジCH2 */
+#define	imAbnSts_OvRngCh3	M_BIT2				/* 2bit:オーバーレンジCH3 */
+
+#define	imAbnSts_UdRngCh1	M_BIT3				/* 3bit:アンダーレンジCH1 */
+#define	imAbnSts_UdRngCh2	M_BIT4				/* 4bit:アンダーレンジCH2 */
+#define	imAbnSts_UdRngCh3	M_BIT5				/* 5bit:アンダーレンジCH3 */
+
+#define	imAbnSts_BurnCh1	M_BIT6				/* 6bit:バーンアウトCH1 */
+#define	imAbnSts_BurnCh2	M_BIT7				/* 7bit:バーンアウトCH2 */
+#define	imAbnSts_BurnCh3	M_BIT8				/* 8bit:バーンアウトCH3 */
+
+#define	imAbnSts_ShortCh1	M_BIT9				/* 9bit:ショートCH1 */
+#define	imAbnSts_ShortCh2	M_BIT10				/* 10bit:ショートCH2 */
+#define	imAbnSts_ShortCh3	M_BIT11				/* 11bit:ショートCH3 */
+
+#define	imAbnSts_SnsrComErr	M_BIT12				/* 12bit:センサ接続異常 */
+#define	imAbnSts_CalErr		M_BIT13				/* 13bit:校正エラー */
+#define	imAbnSts_SnsrErr	M_BIT14				/* 14bit:センサ機器異常 */
+
+#define	imAbnSts_OvUdBurnShortErrCh1	0x7249U
+#define	imAbnSts_OvUdBurnShortCh2		0x3492U
+#define	imAbnSts_OvUdBurnShortCh3		0x0924U
+
+
+/* 機器異常チェックステータス */
+#define	imErrChk_Sleep		0U					/* 初期値 */
+#define	imErrChk_KeyChk		M_BIT0				/* 0bit:キー診断実行 */
+#define	imErrChk_CycChk		M_BIT1				/* 1bit:クロック診断実行 */
+
+
+/*
+ ***************************************
+ *	外付けFlashチップセレクトポート
+ ***************************************
+ */
+#define	P_CS_PRIM		(P12_bit.no5)				/* チップセレクト(プライマリ) */
+#define	P_CS_SECOND		(P6_bit.no1)				/* チップセレクト(セカンダリ) */
+
+
+/*
+ ***************************************
+ *	内蔵Flashアドレス(Modbusで使用)
+ ***************************************
+ */
+//#define	imInFlashAdr_FirstAcsChk		0x0000U
+//#define	imInFlashAdr_OpeCompanyID		0x0002U
+//#define	imInFlashAdr_UniqueID			0x0003U
+//#define	imInFlashAdr_SerialNo			0x0006U
+//#define	imInFlashAdr_RfFreqOffset		0x000AU
+//#define	imInFlashAdr_UpDate				0x000CU
+//#define	imInFlashAdr_CalDate			0x000FU
+
+/*
+ ***************************************
+ *	無線
+ ***************************************
+ */
+#define	imRfRTMeasDataTx_Meas1		0U
+#define	imRfRTMeasDataTx_Meas2		1U
+
+#define	imCareerFlgOff		2U
+#define	imCarrerFlgOn		1U
+#define	imRssiWrite			0U
+#define	imRssiRead			1U
+#define	imCarrerFlgWrite	2U
+#define	imCarrerFlgRead		3U
+
+
+/*
+ ***************************************
+ *	その他
+ ***************************************
+ */
+#define imLoggerNameNum		20U		/* ロガー名称サイズ: 20byte */
+
+/*
+ ***************************************
+ *	ファームアップ
+ ***************************************
+ */
+#define	imFirmUp_FlashWrTopAddr		0xC0000U			/* 外付けフラッシュへ書き込むアドレスの先頭位置 */
+
+
+
+
+#endif

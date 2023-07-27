@@ -1,0 +1,152 @@
+/*
+ *******************************************************************************
+ *	File name	:	glRam.c
+ *
+ *	[内容]
+ *		グローバル変数定義ファイル
+ *	[注記]
+ *
+ *------------------------------------------------------------------------------
+ *	[変更日]		[変更者]		[概要]
+ *	2019.11
+ *******************************************************************************
+ */
+
+
+#include "typedef.h"							/* データ型定義 */
+#include "enum.h"								/* 列挙型の定義 */
+#include "struct.h"								/* 構造体定義 */
+#include "UserMacro.h"
+#include "switch.h"
+
+/* ROMバージョン */
+const uint8_t cRomVer[ 4U ] = { 1U, 3U, 5U, 0U };			/* 0:メジャーVer、1:マイナーVer、2:マイナーVer、3:隠しVer */
+
+/* ROM図番 */
+//const uint8_t cRomFigNo = 1U;
+
+/* センサ種 */
+//const ET_SensType_t	cSensType = ecSensType_ExTh;
+
+/* モード */
+ET_Mode_t gvMode = ecMode_Normal;
+
+/* ファームアップモード */
+uint8_t gvFirmupMode = imOFF;								/* ファームアップ実行状態(on:実行中、off:未実行) */
+
+/* 時刻 */
+ST_RTC_t gvClock = { 20U, 1U, 1U, 0U, 0U, 0U, 0U };			/* RTCデータ */
+uint32_t gvLocalTime = 0U;									/* ローカル時刻 */
+ET_RtcSts_t gvRtcSts = ecRtcSts_Non;						/* 時刻補正ステータス */
+
+uint32_t gvRecCycRtcTm;										/* 収録周期到達時の内蔵RTCの時刻 */
+
+/* MODBUS通信 */
+ST_ModInf_t gvModInf;										/* MODBUS通信情報 */
+
+uint8_t gvCsi10SndEndFlg;									/* 外付けFlash通信CSI10送信完了フラグ */
+uint8_t gvIicSndEndFlg;										/* 外付けRTC通信IIC送信完了フラグ */
+uint8_t gvIicRcvEndFlg;										/* 外付けRTC通信IIC受信完了フラグ */
+
+/* 測定処理 */
+//ET_MeasPhase_t gvMeasPhase = ecMeasPhase_Init;			/* 測定処理フェーズ */
+//ST_MeasTmCnt_t gvMeasRefTmCnt = { 0xFFFFU, 0xFFFFU };		/* リファレンス用タイマカウント */
+//ST_MeasTmCnt_t gvMeasThTmCnt = { 0xFFFFU, 0xFFFFU };		/* サーミスタ用タイマカウント */
+ST_MeasPrm_t gvMeasPrm;										/* 測定処理用パラメータ */
+
+/* 警報 */
+ET_AlmSts_t gvAlmSts[ imChannelNum ][ imAllAlmNum ] = 
+{
+	ecAlmSts_Non, ecAlmSts_Non, ecAlmSts_Non, ecAlmSts_Non,
+	ecAlmSts_Non, ecAlmSts_Non, ecAlmSts_Non, ecAlmSts_Non,
+	ecAlmSts_Non, ecAlmSts_Non, ecAlmSts_Non, ecAlmSts_Non,
+	ecAlmSts_Non, ecAlmSts_Non, ecAlmSts_Non, ecAlmSts_Non
+};
+
+uint8_t gvHsAlmFlag[ 4U ];									/* 最新警報フラグ */
+//uint8_t gvAlmClrPoint = 0U;								/* 警報逸脱クリア契機 */
+uint16_t gvMeasAlmNum = 0U;									/* 計測警報発生/解除回数 */
+uint8_t gvHsMeasAlmFlg = imOFF;								/* 計測警報フラグ */
+
+/* 表示 */
+ST_DispSts_t gvDispMode = 
+{ ecDispMode_UpVerDwNon, ecDispMode_UpVerDwNon };			/* 表示モード */
+
+uint16_t gvLcdComGwId;										/* 接続GWIDの下3桁(LCD表示用) */
+
+/* 電池 */
+uint8_t gvAdConvFinFlg;										/* 電池AD測定完了フラグ */
+ET_LowBatFlashSts_t gvBatLowSts = ecLowBatFlashSts_Init;	/* 低電圧用状態 */
+ET_BattInt_t gvBatt_Int= ecBattInt_Init;					/* 電池低下割込状態 */
+ST_BatAd_t gvBatAd;											/* 電池状態 */
+
+/* 無線 */
+ST_RF_INT_t gvRfIntFlg;										/* 無線IC DIO割り込みフラグ */
+
+uint16_t gvRfTimingCounterL;
+uint16_t gvRfTimingCounterH;
+uint8_t gvRfTimingTempCorrect;								/* gvRfTimingCounterの温度補正 ppm(マイナス) */
+uint8_t gvRfTimingCorrectCnt;								/* gvRfTimingCounterの温度補正を実行する秒カウンタ 3secごとに実行 */
+ST_RF_StsFlag_t gvrfStsEventFlag;
+uint16_t vrfITSyncCount;									/* GWとのタイミング同期用のTuaカウンタ */
+uint8_t vrfRTmodeCommFailNum;
+uint16_t vrfTest;
+
+sint8_t gvInTemp = 25;										/* マイコン測定の内蔵温度(整数表現) */
+
+/* 無線送信データ */
+ST_RTMeasData_t gvRfRTMeasData;								/* 計測データの長距離送信内容 */
+ST_RTMeasAlm2Data_t gvRfRTMeasAlm2Data;						/* 計測周期2の長距離送信内容 */
+
+uint16_t gvFstConnBootCnt;									/* 高速通信起動のための収録データカウンタ */
+
+/* モジュール動作ステータス */
+ST_ModuleSts_t gvModuleSts = 
+{
+	ecRtcIntSts_Sleep,
+	ecExeModuleSts_Sleep,
+	ecMeaModuleSts_Run,
+	ecKeyIntModuleSts_Sleep,
+	ecEventKeyModuleSts_Sleep,
+	ecBatModuleSts_Run,
+	ecComModuleSts_Run,
+	ecRfModuleSts_Run,
+	ecRtcModuleSts_Sleep,
+	ecExFlashModuleSts_Sleep,
+	ecLcdModuleSts_Run,
+	imErrChk_Sleep,
+	ecExFlashRdModuleSts_Sleep,
+	ecInFlashWrExeSts_Sleep,
+	ecHistoryModuleSts_Sleep,
+	ecFirmupModuleSts_Sleep
+};
+
+
+/* 内蔵Flash格納パラメータ */
+ST_InFlashTbl_t gvInFlash;									/* 内蔵Flash格納共通変数 */
+
+ST_ActQue_t gvActQue;										/* 設定変更履歴の一次格納キュー */
+
+uint8_t gvCycTestStart;										/* クロック発振の自己診断開始 */
+
+uint16_t gvFlashReadIndex[ 2U ];							/* Flashからリードした収録データの先頭IndexNo. */
+
+
+/* デバッグ用変数 */
+#if swRfTestLcd == imEnable
+uint8_t	gvRfTestLcdFlg = 1;
+#endif
+
+#if (swRssiLogDebug == imEnable)
+uint8_t gvDebugRssi;
+#endif
+
+#if (swRESFDisp == imEnable)
+uint8_t gvResf;
+#endif
+
+#if (swAdCntLog == imEnable)
+uint8_t gvAdCnt_RfFlg = imOFF;
+#endif
+
+

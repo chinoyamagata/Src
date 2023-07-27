@@ -1,0 +1,954 @@
+/*
+ *******************************************************************************
+ *	File name	:	Modbus.c
+ *
+ *	[内容]
+ *		MODBUS通信処理
+ *------------------------------------------------------------------------------
+ *	[変更日]		[変更者]		[概要]
+ *	2017.11.13		Softex N.I		新規作成
+ *	2020.12.01		Softex K.U		センサ間通信シーケンスに変更
+ *******************************************************************************
+ */
+#include "cpu_sfr.h"															/* SFR定義ヘッダー */
+#include "typedef.h"															/* データ型定義 */
+#include "UserMacro.h"															/* ユーザー作成マクロ定義 */
+#include "immediate.h"															/* immediate定数定義 */
+#include "switch.h"																/* コンパイルスイッチ定義 */
+#include "enum.h"																/* 列挙型の定義 */
+#include "struct.h"																/* 構造体定義 */
+#include "func.h"																/* 関数の外部参照(extern)定義 */
+#include "glLabel.h"															/* グローバル変数・定数(const)ラベル定義 */
+
+/*
+ *==============================================================================
+ *	列挙型定義
+ *==============================================================================
+ */
+/* 通信処理種類 */
+typedef enum ET_ComType
+{
+	ecComType_Non = 0,															/* なし */
+	ecComType_Vid,																/* 変数 */
+	ecComType_Ext,																/* 外部関数処理 */
+
+	ecComType_Max																/* enum最大値 */
+} ET_ComType_t;
+
+typedef enum ET_ParamError
+{
+	ecParamError_OK = 0,														/* OK */
+	ecParamError_RngNG,															/* 範囲外NG */
+	ecParamError_CodeSet,														/* 設定不可 */
+	
+	ecParamErrorMax																/* enum最大値 */
+} ET_ParamError_t;
+
+typedef enum ET_ModMeasErrChkKind
+{
+	ecModMeasErrChkKind_Burn = 0,												/* バーンアウト履歴 */
+	ecModMeasErrChkKind_Under,													/* アンダーレンジ履歴 */
+	ecModMeasErrChkKind_Over,													/* オーバーレンジ履歴 */
+	ecModMeasErrChkKind_SnsErr,													/* センサ機器異常履歴 */
+	ecModMeasErrChkKind_ComErr,													/* センサ間通信エラー履歴 */
+
+	ecModMeasErrChkKindMax														/* enum最大値 */
+} ET_ModMeasErrChkKind_t;
+
+
+/*
+ *==============================================================================
+ *	プロトタイプ宣言
+ *==============================================================================
+*/
+static void SubModbus_CrcMake( const uint8_t *parDatBuf, uint8_t *parCrcBuf, uint16_t arDatBufLen );
+																				/* CRC作成 */
+
+
+/*
+ *==============================================================================
+ *	define定義
+ *==============================================================================
+ */
+#define imMod_ComFinTim			5U								/* 115200bpsの230bit以上の間隔で送信終了の仕様で約2msecだが、マージンを取って5msecとする */
+#define imAnaInCmdRecLen		7U								/* アナログ入力データ受信データ長 7Byte */
+
+#define	imRCV_SRV_ADR_POS		0								/* スレーブアドレス位置 */
+#define	imRCV_FUNC_POS			1								/* ファンクションコード位置 */
+#define	imRCV_DATA_NUM_POS		2								/* データ数位置 */
+
+/* 温湿度データ位置 */
+#define	imRCV_TMPHUM_HUM_H_POS	3								/* 温湿度：湿度 */
+#define	imRCV_TMPHUM_HUM_L_POS	4
+#define	imRCV_TMPHUM_TMP_H_POS	5								/* 温湿度：温度 */
+#define	imRCV_TMPHUM_TMP_L_POS	6
+
+/* Ptデータ位置 */
+#define	imRCV_PT_TMP_H_POS		3								/* Pt温度 */
+#define	imRCV_PT_TMP_L_POS		4
+#define imRCV_PT_CON_H_POS		5								/* Pt接点情報 */
+#define imRCV_PT_CON_L_POS		6
+#define imRCV_PT_DUMMY_H_POS	7								/* Pt温度校正前 */
+#define imRCV_PT_DUMMY_L_POS	8
+
+#define imRCV_SENSOR_H_POS		9								/* センサ種類位置 */
+#define imRCV_SENSOR_L_POS		10
+
+/* 電圧データ位置 */
+#define	imRCV_Voltage_H_POS	3									/* 電圧 */
+#define	imRCV_Voltage_L_POS	4
+
+/* パルスデータ位置 */
+#define	imRCV_Pulse_H_POS 3										/* パルス */
+#define	imRCV_Pulse_L_POS 4
+
+#define	imOK					0								/* OK */
+#define	imNG					1								/* NG */
+
+#define	imSensType_Max			5								/* Modbusセンサ種の最大値 */
+
+
+/*
+ *==============================================================================
+ *	構造体定義
+ *==============================================================================
+ */
+typedef struct ST_SensType
+{
+	ET_SensType_t	mSensorCode;
+	uint8_t			( *mpSensorFunc )( void );
+} ST_SensType_t;
+
+/*
+ *==============================================================================
+ *	変数定義
+ *==============================================================================
+ */
+
+
+/*
+ *==============================================================================
+ *	プロトタイプ宣言
+ *==============================================================================
+ */
+static void SubModbus_ErrChkTxtMake( uint8_t *parSndBuf, uint16_t *parSndLen, uint8_t *parSndBgnPtr );
+																				/* エラーチェック格納処理(CRC) */
+static void SubModbus_CrcMake( const uint8_t *parInBuf, uint8_t *parOutBuf, uint16_t arLen );
+																				/* CRC算出処理 */
+static void SubModbus_Snd( void );												/* コマンド送信 */
+static uint8_t SubModbus_RcvPt( void );
+static uint8_t SubModbus_RcvHumTmp( void );
+static uint8_t SubModbus_RcvDummy( void );
+static sint16_t SubModbus_Rcv8bitToS16bit( uint8_t arNo );
+static void SubModbus_RcvAnalys( void );										/* コマンド受信解析処理 */
+static void SubModbus_StateTrans( void );										/* ステータス状態遷移 */
+static void SubModbus_MeasErrChk( void );										/* 測定エラー処理 */
+
+
+/*
+ *==============================================================================
+ *	定数定義
+ *==============================================================================
+ */
+const ST_SensType_t cSensorType[ 6U ] =
+{
+	/* mSensorCode,			mpSensorFunc */						/* Modbusセンサ種No. */
+	{ ecSensType_HumTmp,	&SubModbus_RcvHumTmp },				/* 0：温湿度 */
+	{ ecSensType_Pt,		&SubModbus_RcvPt },					/* 1：測温抵抗体 */
+	{ ecSensType_V,			&SubModbus_RcvVol },				/* 2：電圧 */
+	{ ecSensType_Pulse,		&SubModbus_RcvPulse },				/* 3：パルス */
+	{ ecSensType_KTc,		&SubModbus_RcvDummy },				/* 4：K熱電対 */
+	{ ecSensType_TTc,		&SubModbus_RcvDummy },				/* 5：T熱電対 */
+};
+
+#pragma section text MY_APP2
+/*
+ *******************************************************************************
+ *	MODBUS通信 初期化処理
+ *
+ *	[内容]
+ *		MODBUS通信 初期化処理
+ *******************************************************************************
+ */
+void ApiModbus_Initial( void )
+{
+	uint16_t	wkLoop;											/* ループカウンタ */
+	
+	for( wkLoop = 0U; wkLoop < imChannelNum ; wkLoop++ )
+	{
+		gvMeasPrm.mMeasVal[ wkLoop ] = imSndSnsErr;
+		gvMeasPrm.mMeasError[ wkLoop ] = 0U;
+	}
+	
+	for( wkLoop = 0U; wkLoop < M_ArrayElement(gvModInf.mSndBuf); wkLoop++ )
+	{
+		gvModInf.mSndBuf[ wkLoop ] = 0U;						/* 送信バッファ初期化 */
+	}
+	for( wkLoop = 0U; wkLoop < M_ArrayElement(gvModInf.mRcvBuf); wkLoop++ )
+	{
+		gvModInf.mRcvBuf[ wkLoop ] = 0U;						/* 受信バッファ初期化 */
+	}
+	gvModInf.mSndLen = 0U;										/* 送信データ長初期化 */
+	gvModInf.mRcvLen = 0U;										/* 受信データ長初期化 */
+	gvModInf.mRcvPos = 0U;										/* 受信データ位置初期化 */
+	gvModInf.mComSts = ecComSts_NullPre;						/* 通信状態初期化 */
+	gvModInf.mRcvTmCnt = 0U;									/* 受信タイマカウンタ */
+	gvModInf.mUnitPwrOnTmCnt = 0U;								/* ユニット起動時間タイマカウンタ */
+	gvModInf.mRetryCnt = 0U;									/* ユニット通信リトライカウンタ */
+	R_UART2_Start();											/* UART2開始 */
+}
+
+
+/*
+ *******************************************************************************
+ *	MODBUS通信メイン
+ *
+ *	[内容]
+ *		MODBUS通信処理を行う。
+ *******************************************************************************
+ */
+void ApiModbus_Main( void )
+{
+	uint32_t	wkLoop;
+
+	switch( gvModInf.mComSts )
+	{
+		case ecComSts_NullPre:													/* NULL送信準備 */
+			M_CLRBIT(PM0, M_BIT3);												/* 方向ポートレジスタ：出力に設定 */
+			M_CLRBIT(P0, M_BIT3);												/* P0_3から0を出力 */
+			for( wkLoop = 0U; wkLoop < 250U; wkLoop++)
+			{
+				M_NOP;
+			}
+			M_SETBIT(P0, M_BIT3);												/* P0_3から1を出力 */
+			M_SETBIT(PM0, M_BIT3);												/* 方向ポートレジスタ：入力に設定 */
+			
+			ApiComDrv_SwitchTx();												/* 送信切り替え処理 */
+			gvModInf.mComSts = ecComSts_UnitPwnOnWait;							/* ユニット起動待ちに状態遷移 */
+			R_TAU0_Channel3_Custom(1875);										/* 20msec後にタイマ割り込み */
+			gvModuleSts.mCom = ecComModuleSts_Wait;								/* タイマ割込み待ち状態に移行 */
+			break;
+			
+		case ecComSts_NullSnd:													/* NULL送信中 */
+			;
+			/*
+			 ***************************************
+			 *	NULL送信完了待ち
+			 ***************************************
+			 */
+			break;
+			
+		case ecComSts_UnitPwnOnWait:											/* ユニット起動待ち */
+			;
+			/*
+			 ***************************************
+			 *	タイマー0割込み(1ms)で20msを計測
+			 ***************************************
+			 */
+			break;
+			
+		case ecComSts_SndPre:													/* コマンド送信準備 */
+			SubModbus_Snd();													/* コマンド送信処理 */
+			gvModInf.mComSts = ecComSts_Snd;									/* コマンド送信中に状態遷移 */
+			break;
+			
+		case ecComSts_Snd:														/* コマンド送信中 */
+			;
+			/*
+			 ***************************************
+			 *	UART2送信完了待ち
+			 ***************************************
+			 */
+			break;
+			
+		case ecComSts_RcvWait:													/* コマンド受信待ち */
+			;
+			/*
+			 ***************************************
+			 *	UART2の受信割込み発生まで待機
+			 *	または、1秒経過(無応答判定)まで待機
+			 ***************************************
+			 */
+			break;
+			
+		case ecComSts_Rcv:														/* コマンド受信中 */
+			;
+			/*
+			 ***************************************
+			 *	全データバイト受信まで待機
+			 ***************************************
+			 */
+			break;
+			
+		case ecComSts_RcvAnalys:												/* コマンド受信解析 */
+			SubModbus_RcvAnalys();												/* コマンド受信解析処理 */
+			break;
+			
+		case ecComSts_Init:
+			/* 測定値一瞬消灯 */
+			if( gvDispMode.mNowDisp == ecDispMode_Up1CHDwClk )
+			{
+				ApiLcd_UppLow7SegDsp("   ", imHigh );
+				ApiLcd_UppLow7SegDsp("   ", imLow );
+				ApiLcd_Main();
+			}
+			gvModInf.mComSts = ecComSts_Lcdoff;									/* 測定前のLED一瞬消灯に状態遷移 */
+			R_TAU0_Channel7_Custom( 0xFFFF );									/* タイマ0(CH7)開始 */
+			gvModuleSts.mCom = ecComModuleSts_Wait;								/* タイマ割込み待ち状態に移行 */
+			break;
+			
+		/* 測定前のLED一瞬消灯の処理 */
+		case ecComSts_Lcdoff:
+			SubModbus_StateTrans();												/* ステータス状態遷移 */
+			gvModInf.mComSts = ecComSts_NullPre;								/* NULL送信準備に以降 */
+			gvModuleSts.mCom = ecComModuleSts_Sleep;							/* 通信スリープ状態に移行 */
+			break;
+			
+		default:
+			break;
+	}
+}
+
+
+/*
+ *******************************************************************************
+ *	エラーチェック格納処理(CRC)
+ *
+ *	[内容]
+ *		エラーチェック作成し、通信電文に格納する。
+ *******************************************************************************
+ */
+static void SubModbus_ErrChkTxtMake( uint8_t *parSndBuf, uint16_t *parSndLen, uint8_t *parSndBgnPtr )
+{
+	uint8_t wkCrcBuf[ 2 ];														/* CRC用バッファ */
+	
+	if( (parSndLen != M_NULL) && (parSndBgnPtr != M_NULL) )
+	{
+		*parSndLen = (uint16_t)(parSndBuf - parSndBgnPtr);						/* データ長取得 */
+		
+		SubModbus_CrcMake(parSndBgnPtr, wkCrcBuf, *parSndLen);					/* CRC作成 */
+		*parSndBuf = wkCrcBuf[ 0 ];												/* CRC LO格納 */
+		parSndBuf++;
+		*parSndBuf = wkCrcBuf[ 1 ];												/* CRC HI格納 */
+		parSndBuf++;
+		
+		*parSndLen += 2U;														/* 送信バッファサイズ格納 */
+	}
+}
+
+
+/*
+ *******************************************************************************
+ *	CRC算出処理
+ *
+ *	[内容]
+ *		CRC算出結果を引数バッファに格納する。
+ *******************************************************************************
+ */
+static void SubModbus_CrcMake( const uint8_t *parInBuf, uint8_t *parOutBuf, uint16_t arLen )
+{
+	uint16_t	wkLoop;															/* ループカウンタ */
+	uint16_t	wkLoop2;														/* ループカウンタ2 */
+	uint16_t	wkCrcBuf;														/* CRC-16データ */
+	
+	
+	if( (parInBuf != M_NULL) && (parOutBuf != M_NULL) )
+	{
+		wkCrcBuf = 0xFFFFU;
+		/*
+		 ***************************************
+		 *	 CRC-16データの出力結果を初期化
+		 ***************************************
+		 */
+		parOutBuf[ 0 ] = 0x00U;
+		parOutBuf[ 1 ] = 0x00U;
+		
+		for( wkLoop = 0U ; wkLoop < arLen ; wkLoop++ )
+		{
+			wkCrcBuf = parInBuf[ wkLoop ] ^ wkCrcBuf;							/* CRC出力結果と入力したデータの排他をとる */
+			/*
+			 ***************************************
+			 *	CRC算出演算
+			 ***************************************
+			 */
+			for( wkLoop2 = 0U ; wkLoop2 < 8U ; wkLoop2++ )
+			{																	/* 8ビットシフトするまで繰り返す */
+				if( (wkCrcBuf & 0x0001U) != 0U )								/* キャリーの有無を調べる */
+				{
+					wkCrcBuf >>= 1U;											/* CRC出力結果を右に1ビットシフト */
+					wkCrcBuf ^= 0xA001U;										/* A001Hとの排他をとる */
+				}
+				else
+				{
+					wkCrcBuf >>= 1U;											/* CRC出力結果を右に1ビットシフト */
+				}
+			}
+		}
+		parOutBuf[ 0 ] = (uint8_t)(wkCrcBuf & 0xFFU);							/* 算出結果を格納(L) */
+		parOutBuf[ 1 ] = (uint8_t)((wkCrcBuf >> 8U) & 0xFFU);					/* 算出結果を格納(H) */
+	}
+}
+
+
+/*
+ *******************************************************************************
+ *	コマンド送信
+ *
+ *	[内容]
+ *		湿度読出しコマンドを送信する。
+ *******************************************************************************
+ */
+static void SubModbus_Snd( void )
+{
+	uint8_t		*pwkSndBgnPtr;													/* 送信バッファ開始アドレス */
+	uint16_t	wkLoop;															/* ループカウンタ */
+	
+	/* 変数初期化 */
+	for( wkLoop = 0U; wkLoop < M_ArrayElement(gvModInf.mSndBuf); wkLoop++ )
+	{
+		gvModInf.mSndBuf[ wkLoop ] = 0U;										/* 送信バッファ初期化 */
+	}
+	
+	pwkSndBgnPtr = gvModInf.mSndBuf;											/* 送信バッファ開始アドレス */
+	
+	gvModInf.mSndBuf[ 0U ] = 0x01U;												/* スレーブアドレス格納 */
+	gvModInf.mSndBuf[ 1U ] = 0x04U;												/* ファンクションコード格納 */
+	gvModInf.mSndBuf[ 2U ] = 0x13U;												/* 相対番号格納 */
+	gvModInf.mSndBuf[ 3U ] = 0x87U;												/* 相対番号格納 */
+	gvModInf.mSndBuf[ 4U ] = 0x00U;												/* データ個数格納 */
+	gvModInf.mSndBuf[ 5U ] = 0x04U;												/* データ個数格納 */
+	
+	gvModInf.mSndLen = 6U;														/* 送信データ長初期化 */
+	
+	/* CRC作成 */
+	SubModbus_ErrChkTxtMake(&gvModInf.mSndBuf[ 6U ], &gvModInf.mSndLen, pwkSndBgnPtr);
+	
+	ApiComDrv_Snd();															/* 送信処理 */
+	R_TAU0_Channel3_Custom(0xFFFF);												/* 700msec後にタイマ割り込み */
+}
+
+
+/*
+ *******************************************************************************
+ *	コマンド受信解析処理
+ *
+ *	[内容]
+ *		ユニットから送信されたコマンドを解析する。
+ *******************************************************************************
+ */
+static void SubModbus_RcvAnalys( void )
+{
+	uint8_t			wkCrcPosLo;													/* CRC格納位置(L) */
+	uint8_t			wkCrcPosHi;													/* CRC格納位置(H) */
+	uint8_t			wkCrcBuf[2];												/* CRC格納先 */
+	uint16_t		wkCrcLen;													/* CRC用バッファ長 */
+	uint16_t		wkDataU16;													/* int16_t型データ */
+	uint16_t		wkLoop;														/* ループカウンタ */
+	
+	uint8_t			wkChkRes = imNG;											/* チェック結果 */
+	
+	
+	if( gvModInf.mRcvLen >= imAnaInCmdRecLen )									/* 受信データ長正常 */
+	{
+		/*
+		 ***************************************
+		 *	CRCのチェック
+		 ***************************************
+		 */
+		wkCrcLen   = gvModInf.mRcvLen - 2U;										/* CRC用バッファ長取得 */
+		wkCrcPosLo = (uint8_t)(gvModInf.mRcvLen - 2U);							/* CRC格納位置(L)取得 */
+		wkCrcPosHi = (uint8_t)(gvModInf.mRcvLen - 1U);							/* CRC格納位置(H)取得 */
+		SubModbus_CrcMake(gvModInf.mRcvBuf, wkCrcBuf, wkCrcLen);				/* CRC作成 */
+		
+		/* CRC、スレーブアドレス、ファンクションコード正常 */
+		if( (wkCrcBuf[0] == gvModInf.mRcvBuf[wkCrcPosLo]) &&
+			(wkCrcBuf[1] == gvModInf.mRcvBuf[wkCrcPosHi]) )
+		{
+			if( (gvModInf.mRcvBuf[imRCV_SRV_ADR_POS] == 0x01) &&				/* スレーブアドレスチェック(1固定) */
+				(gvModInf.mRcvBuf[imRCV_FUNC_POS] == 0x04) )					/* ファンクションコードチェック(4固定) */
+			{
+				wkChkRes = imOK;												/* 読み出し成功 */
+			}
+		}
+	}
+	
+	if( wkChkRes == imOK )														/* 読み出し成功時 */
+	{
+		/* センサ種取得 */
+		wkDataU16 = SubModbus_Rcv8bitToS16bit( imRCV_SENSOR_H_POS );
+		
+		/* 初めてセンサ種取得のとき */
+		if( gvInFlash.mProcess.mModelCode == 0xFFU )
+		{
+			if( wkDataU16 <= imSensType_Max )
+			{
+				gvInFlash.mProcess.mModelCode = cSensorType[ wkDataU16 ].mSensorCode;
+				
+				if( gvInFlash.mProcess.mModelCode == ecSensType_HumTmp && gvDispMode.mNowDisp == ecDispMode_Up1CHDwClk )
+				{
+					gvDispMode.mNowDisp = ecDispMode_Up1CHDw2CH;
+				}
+			}
+			
+			gvModuleSts.mInFlash = ecInFlashWrExeSts_Run;
+		}
+		
+		/* 各センサの測定値取得 */
+		wkChkRes = imNG;
+		if( wkDataU16 <= imSensType_Max )
+		{
+			if( gvInFlash.mProcess.mModelCode == cSensorType[ wkDataU16 ].mSensorCode )
+			{
+				/* オーバフロー/アンダーフロー/センサ間通信エラー解除 */
+				gvMeasPrm.mMeasError[ 0U ] &= ~(imTmpOver | imTmpUnder | imPtBurnError | imComTmpError | imSnsError);
+				gvMeasPrm.mMeasError[ 1U ] &= ~(imTmpOver | imTmpUnder | imPtBurnError | imComTmpError | imSnsError);
+				
+				wkChkRes = cSensorType[ wkDataU16 ].mpSensorFunc();
+			}
+		}
+	}
+	
+	
+	if( wkChkRes == imNG )
+	{
+		gvModInf.mRetryCnt ++;
+		if( gvBatAd.mBattSts != ecBattSts_Non && gvModInf.mRetryCnt <= 3U )
+		{
+			/* 通信リトライ */
+			gvModInf.mComSts = ecComSts_NullPre;								/* NULL送信準備状態に遷移 */
+		}
+		else
+		{
+			/* 通信失敗確定：測定値更新 */
+			gvMeasPrm.mMeasVal[ 0U ] = imSndSnsErr;								/* センサ間通信エラー値設定 */
+			gvMeasPrm.mMeasVal[ 1U ] = imSndSnsErr;								/* センサ間通信エラー値設定 */
+			gvMeasPrm.mMeasError[ 0U ] |= imComTmpError;						/* センサ間通信エラー設定 */
+			gvMeasPrm.mMeasError[ 1U ] |= imComTmpError;						/* センサ間通信エラー設定 */
+			
+			wkChkRes = imOK;
+		}
+	}
+	
+	/* 測定値更新 */
+	if( wkChkRes == imOK )
+	{
+		gvModInf.mRetryCnt = 0U;
+		gvMeasPrm.mTime = gvRecCycRtcTm;										/* 時刻情報格納 */
+		
+		gvMeasPrm.mTimeEvt = ApiTimeComp_GetLocalTime();						/* イベント測定時刻 */
+		gvMeasPrm.mLogic = gvInFlash.mParam.mEventKeyFlg;						/* Eventキー情報格納 */
+		
+		SubModbus_MeasErrChk();													/* 測定エラー処理 */
+		gvModInf.mComSts = ecComSts_Init;										/* 液晶一瞬OFFに遷移 */
+	}
+	
+	
+	gvModuleSts.mCom = ecComModuleSts_Run;										/* 通信モジュールはアクティブ */
+	
+	/* 通信変数初期化 */
+	for( wkLoop = 0U; wkLoop < M_ArrayElement(gvModInf.mRcvBuf); wkLoop++ )
+	{
+		gvModInf.mRcvBuf[ wkLoop ] = 0U;										/* 受信バッファ初期化 */
+	}
+	gvModInf.mRcvLen = 0U;														/* 受信データ長初期化 */
+}
+
+
+/*
+ *******************************************************************************
+ *	Ptの測定値抽出
+ *
+ *	[内容]
+ *		Ptの測定値抽出
+ *******************************************************************************
+ */
+static uint8_t SubModbus_RcvPt( void )
+{
+	sint16_t wkDataS16;
+	sint32_t wkDataS32;
+	
+	/* 温度取得 */
+	wkDataS16 = (sint16_t)SubModbus_Rcv8bitToS16bit( imRCV_PT_TMP_H_POS );
+	
+	/* プローブ側でオーバ/アンダーフローしている */
+	if( wkDataS16 == imComUp_PtModel )
+	{
+		wkDataS32 = imSndTmpOver;											/* オーバーフロー値を設定 */
+		gvMeasPrm.mMeasError[ 0U ] |= imTmpOver;							/* オーバーフローエラー情報を設定 */
+	}
+	else if( wkDataS16 == imComDw_PtModel )
+	{
+		wkDataS32 = imSndTmpUnder;											/* アンダーフロー値を設定 */
+		gvMeasPrm.mMeasError[ 0U ] |= imTmpUnder;							/* アンダーフローエラー情報を設定 */
+	}
+	else if( wkDataS16 == imComBurn_PtModel )
+	{
+		wkDataS32 = imSndTmpBurn;											/* バーンアウト値を設定 */
+		gvMeasPrm.mMeasError[ 0U ] |= imPtBurnError;						/* バーンアウトエラー情報を設定 */
+	}
+	else if( wkDataS16 == imComHard_PtModel )
+	{
+		wkDataS32 = imSndSnsErr;											/* ハードエラー値を設定 */
+		gvMeasPrm.mMeasError[ 0U ] |= imSnsError;							/* ハードエラー情報を設定 */
+	}
+	else
+	{
+		/* 計測値補正 */
+		wkDataS32 = (((sint32_t)wkDataS16 * gvInFlash.mParam.mSlope[ 0U ]) / 100) + gvInFlash.mParam.mOffset[ 0U ];
+		
+		/* オーバ/アンダーフロー判定 */
+		if( wkDataS32 > imTMPUp_PtModel )
+		{
+			wkDataS32 = imSndTmpOver;										/* オーバーフロー値を設定 */
+			gvMeasPrm.mMeasError[ 0U ] |= imTmpOver;						/* オーバーフローエラー情報を設定 */
+		}
+		else if( wkDataS32 < imTMPDw_PtModel )
+		{
+			wkDataS32 = imSndTmpUnder;										/* アンダーフロー値を設定 */
+			gvMeasPrm.mMeasError[ 0U ] |= imTmpUnder;						/* アンダーフローエラー情報を設定 */
+		}
+	}
+	
+	gvMeasPrm.mMeasVal[ 0U ] = (sint16_t)wkDataS32;
+	
+	
+	/* 接点情報取得 */
+	gvMeasPrm.mMeasVal[ 1U ] = (sint16_t)SubModbus_Rcv8bitToS16bit( imRCV_PT_CON_H_POS );
+	
+	return imOK;
+}
+
+/*
+ *******************************************************************************
+ *	温湿度の測定値抽出
+ *
+ *	[内容]
+ *		温湿度の測定値抽出
+ *******************************************************************************
+ */
+static uint8_t SubModbus_RcvHumTmp( void )
+{
+	sint16_t	wkDataS16;
+	sint32_t	wkDataS32;
+	
+	uint8_t		wkChkRes = imOK;
+	
+	static uint8_t	vNoiseRetryCnt = 0U;
+	
+	gvModInf.mRetryCnt = 0U;
+	
+	/* 1ch:温度取得 */
+	wkDataS16 = (sint16_t)SubModbus_Rcv8bitToS16bit( imRCV_TMPHUM_TMP_H_POS );
+	
+	/* プローブ側でオーバ/アンダーフローしている */
+	if( wkDataS16 == imComUp_HumTmpModel )
+	{
+		wkDataS32 = imSndTmpOver;											/* オーバーフロー値を設定 */
+		gvMeasPrm.mMeasError[ 0U ] |= imTmpOver;							/* オーバーフローエラー情報を設定 */
+	}
+	else if( wkDataS16 == imComDw_HumTmpModel )
+	{
+		wkDataS32 = imSndTmpUnder;											/* アンダーフロー値を設定 */
+		gvMeasPrm.mMeasError[ 0U ] |= imTmpUnder;							/* アンダーフローエラー情報を設定 */
+	}
+	else
+	{
+		/* 小数点一桁(四捨五入) */
+		if( wkDataS16 >= 0 )
+		{
+			wkDataS16 += 5U;
+		}
+		else
+		{
+			wkDataS16 -= 5U;
+		}
+		wkDataS16 /= 10;
+		
+		/* 計測値補正 */
+		wkDataS32 = (((sint32_t)wkDataS16 * gvInFlash.mParam.mSlope[ 0U ]) / 100) + gvInFlash.mParam.mOffset[ 0U ];
+		
+		/* オーバ/アンダーフロー判定 */
+		if( wkDataS32 > imTMPUp_HumTmpModel )
+		{
+			wkDataS32 = imSndTmpOver;										/* オーバーフロー値を設定 */
+			gvMeasPrm.mMeasError[ 0U ] |= imTmpOver;						/* オーバーフローエラー情報を設定 */
+		}
+		else if( wkDataS32 < imTMPDw_HumTmpModel )
+		{
+			wkDataS32 = imSndTmpUnder;										/* アンダーフロー値を設定 */
+			gvMeasPrm.mMeasError[ 0U ] |= imTmpUnder;						/* アンダーフローエラー情報を設定 */
+		}
+	}
+	
+	gvMeasPrm.mMeasVal[ 0U ] = (sint16_t)wkDataS32;
+	
+	
+	/* 2ch:湿度取得 */
+	wkDataS16 = (sint16_t)SubModbus_Rcv8bitToS16bit( imRCV_TMPHUM_HUM_H_POS );
+	
+	/* プローブ側で湿度テーブルを下回っている */
+	if( wkDataS16 == imComDummy_HumTmpModel )
+	{
+		wkDataS32 = imSndTmpUnder;
+		gvMeasPrm.mMeasError[ 1U ] |= imTmpUnder;							/* アンダーフローエラー情報を設定 */
+	}
+	else
+	{
+		/* 小数点一桁(四捨五入) */
+		wkDataS16 += 5U;
+		wkDataS16 /= 10;
+		
+		/* 計測値補正 */
+		wkDataS32 = (((sint32_t)wkDataS16 * gvInFlash.mParam.mSlope[ 1U ]) / 100) + gvInFlash.mParam.mOffset[ 1U ];
+		
+		/* オーバ/アンダーフロー判定 */
+		if( wkDataS32 > imHUMUp_HumTmpModel )
+		{
+			wkDataS32 = imHUMUp_HumTmpModel;
+		}
+		else if( wkDataS32 < imHUMDw_HumTmpModel )
+		{
+			wkDataS32 = imHUMDw_HumTmpModel;
+		}
+		
+		/* 湿度0%：3回リトライ */
+		if( wkDataS32 == 0 )
+		{
+			vNoiseRetryCnt ++;
+			if( vNoiseRetryCnt <= 3 )
+			{
+				wkChkRes = imNG;
+			}
+		}
+	}
+	
+	if( wkChkRes == imOK )
+	{
+		vNoiseRetryCnt = 0U;
+		gvMeasPrm.mMeasVal[ 1U ] = (sint16_t)wkDataS32;
+	}
+	
+	return wkChkRes;
+}
+
+/*
+ *******************************************************************************
+ *	
+ *
+ *	[内容]
+ *		
+ *******************************************************************************
+ */
+static uint8_t SubModbus_RcvDummy( void )
+{
+	return imOK;
+}
+
+
+/*
+ *******************************************************************************
+ *	Modbus受信バッファから値成形
+ *
+ *	[内容]
+ *		Modbus受信バッファから16bitの値(温度値、湿度値など)を成形
+ *******************************************************************************
+ */
+static sint16_t SubModbus_Rcv8bitToS16bit( uint8_t arNo )
+{
+	uint16_t wkDataU16;
+	
+	wkDataU16 = ((uint16_t)gvModInf.mRcvBuf[ arNo ] << 8U) + (uint16_t)gvModInf.mRcvBuf[ arNo + 1U ];
+	
+	return wkDataU16;
+}
+
+/*
+ *******************************************************************************
+ *	ステータスの状態遷移
+ *
+ *	[内容]
+ *		ステータスの状態遷移
+ *******************************************************************************
+ */
+static void SubModbus_StateTrans( void )
+{
+	switch( gvModuleSts.mExe )
+	{
+		/* 測定のみ→Sleep */
+		default:
+		case ecExeModuleSts_Meas:
+			gvModuleSts.mExe = ecExeModuleSts_Sleep;
+			break;
+		/* 収録1→警報判定1 */
+		case ecExeModuleSts_Log1:
+			gvModuleSts.mExe = ecExeModuleSts_Alm1;
+			break;
+		/* 収録2→警報判定2 */
+		case ecExeModuleSts_Log2:
+			gvModuleSts.mExe = ecExeModuleSts_Alm2;
+			break;
+	}
+	
+	/* EventKey→警報判定 */
+	if( gvModuleSts.mEventKey == ecEventKeyModuleSts_Meas )
+	{
+		gvModuleSts.mEventKey = ecEventKeyModuleSts_Alm;
+	}
+	gvModuleSts.mLcd = ecLcdModuleSts_Run;										/* LCD更新 */
+}
+
+
+/*
+ *******************************************************************************
+ *	センサ間通信無応答判定
+ *
+ *	[内容]
+ *		センサにコマンド送信してから800msec応答が無かった場合、
+ *		通信異常エラーとする。
+ *******************************************************************************
+ */
+void ApiModbus_NoReplyJudge( void )
+{
+	uint16_t		wkLoop;													/* ループカウンタ */
+	
+	if( gvModInf.mComSts == ecComSts_RcvWait )								/* 受信待ち中 */
+	{
+		R_TAU0_Channel3_Stop();												/* タイマ0(CH3)停止 */
+		
+		gvModInf.mRetryCnt ++;
+		if( gvBatAd.mBattSts != ecBattSts_Non && gvModInf.mRetryCnt <= 3U || gvInFlash.mProcess.mModelCode == 0xFFU )
+		{
+			if( gvInFlash.mProcess.mModelCode == 0xFFU )
+			{
+				gvModInf.mRetryCnt = 0U;
+			}
+			/* 通信リトライ */
+			gvModInf.mComSts = ecComSts_NullPre;							/* NULL送信準備状態に遷移 */
+		}
+		else
+		{
+			/* 通信失敗確定 */
+			gvModInf.mRetryCnt = 0U;
+			gvMeasPrm.mMeasVal[ 0U ] = imSndSnsErr;							/* センサ間通信エラー値設定 */
+			gvMeasPrm.mMeasVal[ 1U ] = imSndSnsErr;							/* センサ間通信エラー値設定 */
+			gvMeasPrm.mMeasError[ 0U ] |= imComTmpError;					/* センサ間通信エラー設定 */
+			gvMeasPrm.mMeasError[ 1U ] |= imComTmpError;					/* センサ間通信エラー設定 */
+			
+			gvMeasPrm.mTime = gvRecCycRtcTm;								/* 時刻情報格納 */
+			
+			gvMeasPrm.mTimeEvt = ApiTimeComp_GetLocalTime();				/* イベント測定時刻 */
+			gvMeasPrm.mLogic = gvInFlash.mParam.mEventKeyFlg;				/* Eventキー情報格納 */
+			
+			SubModbus_MeasErrChk();											/* 測定エラー処理 */
+			gvModInf.mComSts = ecComSts_Init;								/* 液晶一瞬OFFに遷移 */
+		}
+		gvModuleSts.mCom = ecComModuleSts_Run;								/* 通信モジュールはアクティブ */
+		
+		/* 変数初期化 */
+		for( wkLoop = 0U; wkLoop < M_ArrayElement(gvModInf.mRcvBuf); wkLoop++ )
+		{
+			gvModInf.mRcvBuf[ wkLoop ] = 0U;								/* 受信バッファ初期化 */
+		}
+		gvModInf.mRcvLen = 0U;												/* 受信データ長初期化 */
+	}
+}
+
+
+/*
+ *******************************************************************************
+ * 測定エラー処理
+ *
+ *	[内容]
+ *		発生しているエラーのフラグを立て、Flashに異常履歴として記録する。
+ *	[引数]
+ *		なし
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+static void SubModbus_MeasErrChk( void )
+{
+	uint8_t					wkChannel;
+	ET_ModMeasErrChkKind_t	wkAlmKind;
+	uint16_t				wkAbnSts;
+	uint16_t				wkMeasError;
+	uint16_t				wkMeasErrFlg;
+	
+	for( wkChannel = 0U ; wkChannel < imMeasChNum ; wkChannel++ )
+	{
+		/* 複数発生時の通報優先 */
+		wkMeasError = gvMeasPrm.mMeasError[ wkChannel ];
+		
+		if( wkMeasError & imTmpUnder )
+		{
+			wkMeasError &= imTmpUnder;
+		}
+		if( wkMeasError & imTmpOver )
+		{
+			wkMeasError &= imTmpOver;
+		}
+		if( wkMeasError & imPtBurnError )
+		{
+			wkMeasError &= imPtBurnError;
+		}
+		if( wkMeasError & imSnsError )
+		{
+			wkMeasError &= imSnsError;
+		}
+		
+		if( wkMeasError & imComTmpError )
+		{
+			wkMeasError &= imComTmpError;
+		}
+		
+		for( wkAlmKind = ecModMeasErrChkKind_Burn ; wkAlmKind < ecModMeasErrChkKindMax ; wkAlmKind++ )
+		{
+			switch( wkAlmKind )
+			{
+				/* バーンアウト履歴 */
+				case ecModMeasErrChkKind_Burn:
+					wkAbnSts = imAbnSts_BurnCh1;
+					wkMeasErrFlg = imRefBurnError | imThBurnError;
+					break;
+					
+				/* アンダーレンジ履歴 */
+				case ecModMeasErrChkKind_Under:
+					wkAbnSts = imAbnSts_UdRngCh1;
+					wkMeasErrFlg = imTmpUnder;
+					break;
+					
+				/* オーバーレンジ履歴 */
+				case ecModMeasErrChkKind_Over:
+					wkAbnSts = imAbnSts_OvRngCh1;
+					wkMeasErrFlg = imTmpOver;
+					break;
+					
+				/* センサ機器異常履歴 */
+				case ecModMeasErrChkKind_SnsErr:
+					wkAbnSts = imAbnSts_SnsrErr;
+					wkMeasErrFlg = imSnsError;
+					break;
+					
+				/* センサ間通信エラー履歴 */
+				case ecModMeasErrChkKind_ComErr:
+					wkAbnSts = imAbnSts_SnsrComErr;
+					wkMeasErrFlg = imComTmpError;
+					break;
+			}
+			wkAbnSts <<= wkChannel;
+			
+			if( wkMeasError & wkMeasErrFlg )
+			{
+				/* 今回セット */
+				ApiAbn_AbnStsSet( wkAbnSts, ecAbnInfKind_MeasSts );
+			}
+			else
+			{
+				/* 今回セット */
+				ApiAbn_AbnStsClr( wkAbnSts, ecAbnInfKind_MeasSts );
+			}
+		}
+	}
+}
+
+#pragma section

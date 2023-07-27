@@ -1,0 +1,892 @@
+/*
+ *******************************************************************************
+ *	File name	:	Alarm.c
+ *
+ *	[内容]
+ *		測定処理
+ *------------------------------------------------------------------------------
+ *	[変更日]		[変更者]		[概要]
+ *	2018.06
+ *******************************************************************************
+ */
+#include "cpu_sfr.h"							/* SFR定義ヘッダー */
+
+#include "typedef.h"							/* データ型定義 */
+#include "UserMacro.h"							/* ユーザー作成マクロ定義 */
+#include "immediate.h"							/* immediate定数定義 */
+#include "switch.h"								/* コンパイルスイッチ定義 */
+#include "enum.h"								/* 列挙型の定義 */
+#include "struct.h"								/* 構造体定義 */
+#include "func.h"								/* 関数の外部参照(extern)定義 */
+#include "glLabel.h"							/* グローバル変数・定数(const)ラベル定義 */
+#include <string.h>
+
+//#define	swDeviEnaTime		/* 逸脱許容時間の機能は第一フェースでは削除 */
+/*
+ *==============================================================================
+ *	define定義
+ *==============================================================================
+ */
+#define HHDelayCntOn	M_BIT0		/* 上上限警報発生 */
+#define HHDelayCntOff	M_BIT1		/* 上上限警報解除 */
+#define HHDevOn			M_BIT2		/* 上上限逸脱発生 */
+#define HHDevOff		M_BIT3		/* 上上限逸脱解除 */
+#define HDelayCntOn		M_BIT4		/* 上限警報発生 */
+#define HDelayCntOff	M_BIT5		/* 上限警報解除 */
+#define HDevOn			M_BIT6		/* 上限逸脱発生 */
+#define HDevOff			M_BIT7		/* 上限逸脱解除 */
+#define LDevOff			M_BIT8		/* 下限逸脱解除 */
+#define LDevOn			M_BIT9		/* 下限逸脱発生 */
+#define LDelayCntOff	M_BIT10		/* 下限警報解除 */
+#define LDelayCntOn		M_BIT11		/* 下限警報発生 */
+#define LLDevOff		M_BIT12		/* 下下限逸脱解除 */
+#define LLDevOn			M_BIT13		/* 下下限逸脱発生 */
+#define LLDelayCntOff	M_BIT14		/* 下下限警報解除 */
+#define LLDelayCntOn	M_BIT15		/* 下下限警報発生 */
+#define HHLLNone		0
+
+#define DeviDisable		-32768		/* 逸脱演算無効 */
+
+
+/*
+ *==============================================================================
+ *	列挙型定義
+ *==============================================================================
+ */
+
+/* 逸脱許容時間ステータス */
+typedef enum ET_DevEnaSts
+{
+	ecDevEnaSts_Non = 0,			/* 初期 */
+	ecDevEnaSts_Fin,				/* 逸脱許容時間完了 */
+	
+	ecDevEnaStsMax
+} ET_DevEnaSts_t;
+
+
+/*
+ *==============================================================================
+ *	構造体定義
+ *==============================================================================
+ */
+/* 警報関連 */
+typedef struct ST_AlmPrm
+{
+	uint8_t			mDelayCnt[ imAllAlmNum ][ imChannelNum ];		/* 遅延回数カウンタ */
+	
+//	ET_AlmSts_t		mAlmSts[ imAllAlmNum ];							/* 警報ステータス */
+#ifdef swDeviEnaTime
+	uint16_t		mDevEnaCnt[ imAllAlmNum ];						/* 逸脱許容時間カウンタ */
+	ET_DevEnaSts_t	mDevEnaSts[ imAllAlmNum ];						/* 許容時間ステータス */
+	uint32_t		mLastTime;										/* 前回測定時刻 */
+#endif
+} ST_AlmPrm_t;
+
+
+typedef struct ST_HistSet
+{
+	ET_AlmKind_t	mAlmNum;			/* 警報種類(上上限/上限/下限/下下限) */
+	ET_MeasAlmItm_t	mAlmItm;			/* 警報項目(逸脱/警報など) */
+	uint8_t			mOnOffFlg;			/* 警報発生/解除 */
+	uint16_t		mAlmSts;			/* 計測警報発生/解除の情報更新bit */
+} ST_HistSet_t;
+
+
+/* 計測警報履歴ソート */
+typedef struct ST_HistSort
+{
+	uint16_t			mAlmSts;		/* 計測警報発生/解除の情報更新bit */
+	uint8_t				mOnOffFlg;		/* 警報発生/解除 */
+	ET_AlmKind_t		mAlmNum;		/* 警報種類(上上限/上限/下限/下下限) */
+	ET_MeasAlmItm_t		mAlmItm;		/* 警報項目(逸脱/警報など) */
+} ST_HistSort_t;
+
+
+/*
+ *==============================================================================
+ *	変数定義
+ *==============================================================================
+ */
+static ST_AlmPrm_t stAlmSts;										/* 警報状態 */
+static uint8_t		vMeasAlmLog2Flg;		/* 周期1、2のどちらで発生したかのフラグ */
+static uint16_t		vHistAlmSts;			/* 警報履歴用ステータス */
+
+/*
+ *==============================================================================
+ *	定数定義
+ *==============================================================================
+ */
+/* 計測警報履歴記録用の計測警報発生/解除更新テーブル */
+const ST_HistSet_t	cHistAlmSetTbl[ 16U ] =
+{
+	/* 警報種類			警報項目					警報発生/解除	情報更新bit */
+	{ ecAlmKind_HH,		ecMeasAlmItm_MeasDev,			imON,	HHDevOn			},
+	{ ecAlmKind_HH,		ecMeasAlmItm_MeasDev,			imOFF,	HHDevOff		},
+	{ ecAlmKind_HH,		ecMeasAlmItm_MeasAlmDelayCnt,	imON,	HHDelayCntOn	},
+	{ ecAlmKind_HH,		ecMeasAlmItm_MeasAlmDelayCnt,	imOFF,	HHDelayCntOff	},
+	{ ecAlmKind_H,		ecMeasAlmItm_MeasDev,			imON,	HDevOn			},
+	{ ecAlmKind_H,		ecMeasAlmItm_MeasDev,			imOFF,	HDevOff			},
+	{ ecAlmKind_H,		ecMeasAlmItm_MeasAlmDelayCnt,	imON,	HDelayCntOn		},
+	{ ecAlmKind_H,		ecMeasAlmItm_MeasAlmDelayCnt,	imOFF,	HDelayCntOff	},
+	{ ecAlmKind_L,		ecMeasAlmItm_MeasDev,			imON,	LDevOn			},
+	{ ecAlmKind_L,		ecMeasAlmItm_MeasDev,			imOFF,	LDevOff			},
+	{ ecAlmKind_L,		ecMeasAlmItm_MeasAlmDelayCnt,	imON,	LDelayCntOn		},
+	{ ecAlmKind_L,		ecMeasAlmItm_MeasAlmDelayCnt,	imOFF,	LDelayCntOff	},
+	{ ecAlmKind_LL,		ecMeasAlmItm_MeasDev,			imON,	LLDevOn			},
+	{ ecAlmKind_LL,		ecMeasAlmItm_MeasDev,			imOFF,	LLDevOff		},
+	{ ecAlmKind_LL,		ecMeasAlmItm_MeasAlmDelayCnt,	imON,	LLDelayCntOn	},
+	{ ecAlmKind_LL,		ecMeasAlmItm_MeasAlmDelayCnt,	imOFF,	LLDelayCntOff	}
+};
+
+/* 計測警報履歴の発生/解除のソートテーブル */
+const ST_HistSort_t	cHistAlmSortTbl[ 2U ][ 10U ] =
+{
+		/* 情報更新bit	警報発生/解除	警報種類	警報項目 */
+	{
+		{ LLDelayCntOff,	imOFF,	ecAlmKind_LL,	ecMeasAlmItm_MeasAlmDelayCnt	},		/* 下下限警報解除 */
+		{ LLDevOff,			imOFF,	ecAlmKind_LL,	ecMeasAlmItm_MeasDev			},		/* 下下限逸脱解除 */
+		{ LDelayCntOff,		imOFF,	ecAlmKind_L,	ecMeasAlmItm_MeasAlmDelayCnt	},		/* 下限警報解除 */
+		{ LDevOff,			imOFF,	ecAlmKind_L,	ecMeasAlmItm_MeasDev			},		/* 下限逸脱解除 */
+		{ HDevOn,			imON,	ecAlmKind_H,	ecMeasAlmItm_MeasDev			},		/* 上限逸脱発生 */
+		{ HDelayCntOn,		imON,	ecAlmKind_H,	ecMeasAlmItm_MeasAlmDelayCnt	},		/* 上限警報発生 */
+		{ HHDevOn,			imON,	ecAlmKind_HH,	ecMeasAlmItm_MeasDev			},		/* 上上限逸脱発生 */
+		{ HHDelayCntOn,		imON,	ecAlmKind_HH,	ecMeasAlmItm_MeasAlmDelayCnt	},		/* 上上限警報発生 */
+		{ HHLLNone,			imOFF,	ecAlmKind_HH,	ecMeasAlmItm_Init				},
+		{ HHLLNone,			imOFF,	ecAlmKind_HH,	ecMeasAlmItm_Init				}
+	},
+	{
+		{ HHDelayCntOff,	imOFF,	ecAlmKind_HH,	ecMeasAlmItm_MeasAlmDelayCnt	},		/* 上上限警報解除 */
+		{ HHDevOff,			imOFF,	ecAlmKind_HH,	ecMeasAlmItm_MeasDev			},		/* 上上限逸脱解除 */
+		{ HDelayCntOff,		imOFF,	ecAlmKind_H,	ecMeasAlmItm_MeasAlmDelayCnt	},		/* 上限警報解除 */
+		{ HDevOff,			imOFF,	ecAlmKind_H,	ecMeasAlmItm_MeasDev			},		/* 上限逸脱解除 */
+		{ LDevOn,			imON,	ecAlmKind_L,	ecMeasAlmItm_MeasDev			},		/* 下限逸脱発生 */
+		{ LDelayCntOn,		imON,	ecAlmKind_L,	ecMeasAlmItm_MeasAlmDelayCnt	},		/* 下限警報発生 */
+		{ LLDevOn,			imON,	ecAlmKind_LL,	ecMeasAlmItm_MeasDev			},		/* 下下限逸脱発生 */
+		{ LLDelayCntOn,		imON,	ecAlmKind_LL,	ecMeasAlmItm_MeasAlmDelayCnt	},		/* 下下限警報発生 */
+		{ HHLLNone,			imOFF,	ecAlmKind_HH,	ecMeasAlmItm_Init				},
+		{ HHLLNone,			imOFF,	ecAlmKind_HH,	ecMeasAlmItm_Init				}
+	}
+};
+
+const ST_HistSort_t	cHistAlmSortTbl_Add1[ 2U ] =
+{
+		{ LDelayCntOn,		imON,	ecAlmKind_L,	ecMeasAlmItm_MeasAlmDelayCnt	},		/* 下限警報発生 */
+		{ HDelayCntOn,		imON,	ecAlmKind_H,	ecMeasAlmItm_MeasAlmDelayCnt	}		/* 上限警報発生 */
+};
+
+const ST_HistSort_t	cHistAlmSortTbl_Add2[ 2U ][ 2U ] =
+{
+	{
+		{ HHDelayCntOff,	imOFF,	ecAlmKind_HH,	ecMeasAlmItm_MeasAlmDelayCnt	},		/* 上上限警報解除 */
+		{ HHDevOff,			imOFF,	ecAlmKind_HH,	ecMeasAlmItm_MeasDev			}		/* 上上限逸脱解除 */
+	},
+	{
+		{ LLDelayCntOff,	imOFF,	ecAlmKind_LL,	ecMeasAlmItm_MeasAlmDelayCnt	},		/* 下下限警報解除 */
+		{ LLDevOff,			imOFF,	ecAlmKind_LL,	ecMeasAlmItm_MeasDev			}		/* 下下限逸脱解除 */
+	}
+};
+
+
+/*
+ *==============================================================================
+ *	プロトタイプ宣言
+ *==============================================================================
+ */
+static void SubAlarm_HistSet( uint8_t arOnOffFlg, uint8_t arAlmNum, ET_MeasAlmItm_t arSts );
+static void SubAlarm_Hist( uint8_t arCh );
+static void SubAlarm_MeasAlm2DataSet( void );
+
+
+#pragma section text MY_APP2
+/*
+ *******************************************************************************
+ *	警報処理 初期化処理
+ *
+ *	[内容]
+ *		警報処理の初期化処理を行う。
+ *******************************************************************************
+ */
+void ApiAlarm_Initial( void )
+{
+	memset( &stAlmSts, 0, sizeof(stAlmSts) );
+}
+
+
+/*
+ *******************************************************************************
+ * 警報処理メイン
+ *
+ *	[内容]
+ *		警報処理メイン
+ *******************************************************************************
+ */
+void ApiAlarm_Main( void )
+{
+	uint8_t				wkAlmNum;												/* 警報種類 */
+	uint8_t				wkChannel;												/* チャンネル */
+	uint8_t				wkReleaseAlmFlg;										/* アラーム解除判定 */
+	uint8_t				wkBit;													/* 逸脱、警報のフラグを立てるBit位置 */
+	uint8_t				wkDelayCnt;												/* 遅延回数 */
+	uint8_t				wkHsMeasAlmFlg = imOFF;
+	uint16_t			wkDevEna;												/* 逸脱演算の有効無効 */
+	sint16_t			wkDevVal;												/* 逸脱値 */
+	
+#ifdef swDeviEnaTime
+	uint16_t			wkDeviEnaTime;											/* 逸脱許容時間 */
+	uint32_t			wkTimeCal;
+#endif
+	
+	for( wkChannel = 0U; wkChannel < imChannelNum; wkChannel++ )
+	{
+		vHistAlmSts = 0U;
+		for( wkAlmNum = 0U; wkAlmNum < imAllAlmNum; wkAlmNum++ )
+		{
+			/* 警報判定用パラメータセット */
+			wkDevEna = imOFF;
+			
+			/* 逸脱許可有無/逸脱値/遅延カウント */
+			switch( wkAlmNum )
+			{
+				/* 上上限警報 */
+				case ecAlmKind_HH:
+					/* 逸脱演算の有効無効確認 */
+					if( gvInFlash.mParam.mDeviUU[ wkChannel ] != DeviDisable )
+					{
+						wkDevEna = imON;											/* 有効 */
+					}
+					wkDevVal = gvInFlash.mParam.mDeviUU[ wkChannel ];				/* 上上限の逸脱値格納 */
+					wkDelayCnt = gvInFlash.mParam.mDelayUU[ wkChannel ];			/* 上上限の遅延回数格納 */
+					wkBit = imAlmFlgHH;
+#ifdef swDeviEnaTime
+					wkDeviEnaTime = gvInFlash.mParam.mDeviEnaTime;
+#endif
+					break;
+					
+				/* 上限警報 */
+				case ecAlmKind_H:
+					if( gvInFlash.mParam.mDeviU[ wkChannel ] != DeviDisable )
+					{
+						wkDevEna = imON;											/* 有効 */
+					}
+					wkDevVal = gvInFlash.mParam.mDeviU[ wkChannel ];				/* 上限の逸脱値格納 */
+					wkDelayCnt = gvInFlash.mParam.mDelayU[ wkChannel ];				/* 上限の遅延回数格納 */
+					wkBit = imAlmFlgH;
+#ifdef swDeviEnaTime
+					wkDeviEnaTime = gvInFlash.mParam.mDeviEnaTime;
+#endif
+					break;
+					
+				/* 下限警報 */
+				case ecAlmKind_L:
+					if( gvInFlash.mParam.mDeviL[ wkChannel ] != DeviDisable )
+					{
+						wkDevEna = imON;											/* 有効 */
+					}
+					wkDevVal = gvInFlash.mParam.mDeviL[ wkChannel ];				/* 下限の逸脱値格納 */
+					wkDelayCnt = gvInFlash.mParam.mDelayL[ wkChannel ];				/* 下限の遅延回数格納 */
+					wkBit = imAlmFlgL;
+#ifdef swDeviEnaTime
+					wkDeviEnaTime = gvInFlash.mParam.mDeviEnaTime;
+#endif
+					break;
+					
+				/* 下下限警報 */
+				case ecAlmKind_LL:
+					if( gvInFlash.mParam.mDeviLL[ wkChannel ] != DeviDisable )
+					{
+						wkDevEna = imON;											/* 有効 */
+					}
+					wkDevVal = gvInFlash.mParam.mDeviLL[ wkChannel ];				/* 下下限の逸脱値格納 */
+					wkDelayCnt = gvInFlash.mParam.mDelayLL[ wkChannel ];			/* 下下限の遅延回数格納 */
+					wkBit = imAlmFlgLL;
+#ifdef swDeviEnaTime
+					wkDeviEnaTime = gvInFlash.mParam.mDeviEnaTime;
+#endif
+					break;
+				default:
+					return;
+			}
+			
+#if (swSensorCom == imEnable)
+			/* 計測値が逸脱値を下回ったとき(Over/Under/Burn/Short/センサエラーを除く) or 逸脱許可無効 or イベントキーOFF状態 or バーンアウト、ショートでない or 通信異常エラーではない */
+			if( ((wkAlmNum == ecAlmKind_HH || wkAlmNum == ecAlmKind_H) && gvMeasPrm.mMeasVal[ wkChannel ] < wkDevVal && !(gvMeasPrm.mMeasError[ wkChannel ] & imOvUnBrnShrtComSns)) ||
+				((wkAlmNum == ecAlmKind_LL || wkAlmNum == ecAlmKind_L) && gvMeasPrm.mMeasVal[ wkChannel ] > wkDevVal && !(gvMeasPrm.mMeasError[ wkChannel ] & imOvUnBrnShrtComSns)) ||
+				((wkAlmNum == ecAlmKind_HH || wkAlmNum == ecAlmKind_H) && (gvMeasPrm.mMeasError[ wkChannel ] & imTmpUnder) && !(gvMeasPrm.mMeasError[ wkChannel ] & imComTmpError)) ||
+				((wkAlmNum == ecAlmKind_LL || wkAlmNum == ecAlmKind_L) && (gvMeasPrm.mMeasError[ wkChannel ] & imTmpOver) && !(gvMeasPrm.mMeasError[ wkChannel ] & imComTmpError)) ||
+				(wkDevEna == imOFF) || (gvInFlash.mParam.mEventKeyFlg == imOFF) )
+#else
+			/* 計測値が逸脱値を下回ったとき(Over/Under/Burn/Shortを除く) or 逸脱許可無効 or イベントキーOFF状態 or バーンアウト、ショートでない*/
+			if( ((wkAlmNum == ecAlmKind_HH || wkAlmNum == ecAlmKind_H) && gvMeasPrm.mMeasVal[ wkChannel ] < wkDevVal && !(gvMeasPrm.mMeasError[ wkChannel ] & imOvUnBrnShrt)) ||
+				((wkAlmNum == ecAlmKind_LL || wkAlmNum == ecAlmKind_L) && gvMeasPrm.mMeasVal[ wkChannel ] > wkDevVal && !(gvMeasPrm.mMeasError[ wkChannel ] & imOvUnBrnShrt)) ||
+				((wkAlmNum == ecAlmKind_HH || wkAlmNum == ecAlmKind_H) && (gvMeasPrm.mMeasError[ wkChannel ] & imTmpUnder)) ||
+				((wkAlmNum == ecAlmKind_LL || wkAlmNum == ecAlmKind_L) && (gvMeasPrm.mMeasError[ wkChannel ] & imTmpOver)) ||
+				(wkDevEna == imOFF) || (gvInFlash.mParam.mEventKeyFlg == imOFF) )
+#endif
+
+#ifdef swDeviEnaTime
+				|| (gvAlmClrPoint & imAlmClrPoint_Time) )
+#endif
+			{
+				wkReleaseAlmFlg = imON;
+			}
+			else
+			{
+				wkReleaseAlmFlg = imOFF;
+			}
+			
+			
+			/* 警報ステータス：未発生 */
+			if( ecAlmSts_Non == gvAlmSts[ wkChannel ][ wkAlmNum ] )
+			{
+				/* 計測値が逸脱値を下回ったとき or 逸脱許可無効 or イベントキーOFF状態 */
+				if( wkReleaseAlmFlg == imON )
+				{
+					;																		/* 無処理 */
+				}
+				/* 計測値が逸脱値を上回ったとき */
+				else
+				{
+#if (swSensorCom == imEnable)
+					/* バーンアウト、ショート、オーバー、アンダー、センサエラー時は上上限/上限/下限/下下限警報は発生させずにステータス維持 */
+					if( gvMeasPrm.mMeasError[ wkChannel ] & imOvUnBrnShrtComSns )
+#else
+					/* バーンアウト、ショート、オーバー、アンダー時は上上限/上限/下限/下下限警報は発生させずにステータス維持 */
+					if( gvMeasPrm.mMeasError[ wkChannel ] & imOvUnBrnShrt )
+#endif
+					{
+						;
+					}
+					else
+					{
+						gvMeasPrm.mDevFlg[ wkChannel ] |= wkBit;							/* 現在の測定値逸脱フラグをON */
+						
+						/* 計測警報履歴セット準備 */
+						SubAlarm_HistSet( imON, wkAlmNum, ecMeasAlmItm_MeasDev );
+						
+						/* 逸脱発生点を計測警報領域にライト */
+						gvMeasAlmNum ++;													/* 計測警報発生/解除回数インクリメント */
+						wkHsMeasAlmFlg = imON;
+						
+						/* 警報判定 */
+						gvAlmSts[ wkChannel ][ wkAlmNum ] = ecAlmSts_DelayCnt;				/* 警報ステータス：遅延回数計測中に更新 */
+					}
+				}
+			}
+			
+			
+			/* 警報ステータス：遅延回数計測中 */
+			if( ecAlmSts_DelayCnt == gvAlmSts[ wkChannel ][ wkAlmNum ] )
+			{
+				/* 計測値が逸脱値を下回ったとき or 逸脱許可無効 or イベントキーOFF状態 */
+				if( wkReleaseAlmFlg == imON )
+				{
+					gvMeasPrm.mDevFlg[ wkChannel ] &= ~wkBit;								/* 現在の測定値逸脱フラグをOFF */
+					
+					/* 計測警報履歴セット準備 */
+					SubAlarm_HistSet( imOFF, wkAlmNum, ecMeasAlmItm_MeasDev );
+					
+					/* 逸脱解除点を計測警報領域にライト */
+					gvMeasAlmNum ++;														/* 計測警報発生/解除回数インクリメント */
+					wkHsMeasAlmFlg = imON;
+					
+					/* 通常測定での警報処理(Eventキーでの測定以外) or イベントキーOFF */
+					if( (gvModuleSts.mEventKey != ecEventKeyModuleSts_Alm) ||
+						(gvInFlash.mParam.mEventKeyFlg == imOFF) )
+#ifdef swDeviEnaTime
+						|| (gvAlmClrPoint & (imAlmClrPoint_Time | imAlmClrPoint_FlgCng)) )
+#endif
+					{
+#ifdef swDeviEnaTime
+						if( gvModuleSts.mEventKey != ecEventKeyModuleSts_Alm )
+						{
+							;
+						}
+						else
+						{
+							stAlmSts.mDevEnaCnt[ wkAlmNum ] = 0U;							/* 逸脱許容時間カウンタ：0クリア */
+						}
+#endif
+						stAlmSts.mDelayCnt[ wkAlmNum ][ wkChannel ] = 0U;					/* 遅延回数クリア */
+						
+						gvAlmSts[ wkChannel ][ wkAlmNum ] = ecAlmSts_Non;					/* 警報ステータス：未発生に更新 */
+					}
+				}
+				/* 計測値が逸脱値を上回ったとき */
+				else
+				{
+#if (swSensorCom == imEnable)
+					/* バーンアウト、ショート、オーバー、アンダー、センサエラー時は上上限/上限/下限/下下限警報は発生させずにステータス維持 */
+					if( gvMeasPrm.mMeasError[ wkChannel ] & imOvUnBrnShrtComSns )
+#else
+					/* バーンアウト、ショート、オーバー、アンダー、時は上上限/上限/下限/下下限警報は発生させずにステータス維持 */
+					if( gvMeasPrm.mMeasError[ wkChannel ] & imOvUnBrnShrt )
+#endif
+					{
+#if (swSensorCom == imEnable)
+						/* バーンアウト、ショート、センサエラー時は遅延回数クリア */
+						if( gvMeasPrm.mMeasError[ wkChannel ] & imBurnShortComSns )
+#else
+						/* バーンアウト、ショート時は遅延回数クリア */
+						if( gvMeasPrm.mMeasError[ wkChannel ] & imBurnShort )
+#endif
+						{
+							stAlmSts.mDelayCnt[ wkAlmNum ][ wkChannel ] = 0U;				/* 遅延回数クリア */
+						}
+					}
+					else
+					{
+						/* 通常測定での警報処理(Eventキーでの測定以外、但し遅延回数0回を除く) */
+						if( gvModuleSts.mEventKey != ecEventKeyModuleSts_Alm || wkDelayCnt == 0U )
+						{
+							stAlmSts.mDelayCnt[ wkAlmNum ][ wkChannel ] += 1U;				/* 遅延回数を更新 */
+						
+						/* 遅延回数が設定値を超えたら(但しOver/Underの場合は即時) */
+//							if( (wkDelayCnt < stAlmSts.mDelayCnt[ wkAlmNum ][ wkChannel ]) ||
+//								(gvMeasPrm.mMeasError[ wkChannel ] & imTmpOverUnder) )
+							if( wkDelayCnt < stAlmSts.mDelayCnt[ wkAlmNum ][ wkChannel ] )
+						{
+							gvMeasPrm.mAlmFlg[ wkChannel ] |= wkBit;						/* 現在の測定値警報フラグをON */
+							
+							/* 計測警報履歴セット準備 */
+							SubAlarm_HistSet( imON, wkAlmNum, ecMeasAlmItm_MeasAlmDelayCnt );
+							
+							/* 警報発生点(遅延回数経過)を計測警報領域にライト */
+							gvMeasAlmNum ++;												/* 計測警報発生/解除回数インクリメント */
+							wkHsMeasAlmFlg = imON;
+							
+							gvAlmSts[ wkChannel ][ wkAlmNum ] = ecAlmSts_ActDelayCnt;		/* 警報ステータス：警報発生中(遅延回数経過)に更新 */
+						}
+						/* 遅延回数が設定値未満 */
+						else
+						{
+							;																/* 無処理 */
+						}
+						
+						if( gvInFlash.mData.mAlmPast[ wkChannel ] == ecAlmPastSts_Non )
+						{
+							/* 過去警報フラグ */
+							gvInFlash.mData.mAlmPast[ wkChannel ] = ecAlmPastSts_Pre;		/* 過去警報フラグ準備 */
+						}
+						
+#ifdef swDeviEnaTime
+						/* 逸脱許容時間設定値：あり、前回測定時刻：あり → 逸脱許容時間判定 */
+						if( (wkDeviEnaTime != 0U) && (stAlmSts.mLastTime != 0U) )
+						{
+							wkTimeCal = gvMeasPrm.mTime - stAlmSts.mLastTime;
+							stAlmSts.mDevEnaCnt[ wkAlmNum ] += wkTimeCal;
+							wkTimeCal = stAlmSts.mDevEnaCnt[ wkAlmNum ];
+							wkTimeCal /= 60U;
+							if( wkTimeCal >= wkDeviEnaTime )
+							{
+								gvMeasPrm.mAlmFlg[ wkChannel ] |= wkBit;					/* 現在の測定値警報フラグをON */
+								
+								/* 警報発生点(逸脱許容時間経過)を計測警報領域にライト */
+									ApiFlash_WriteMeasAlm( imON, wkChannel, wkAlmNum, gvMeasPrm.mMeasVal[ wkChannel ], ecMeasAlmItm_MeasAlmDevTime );
+								
+								gvAlmSts[ wkChannel ][ wkAlmNum ] = ecAlmSts_ActDevTime;	/* 警報ステータス：警報発生中(逸脱許容時間経過)に更新 */
+								
+								stAlmSts.mDevEnaSts[ wkAlmNum ] = ecDevEnaSts_Fin;			/* 逸脱許容時間ステータス：許容時間完了に更新 */
+							}
+						}
+#endif
+					}
+				}
+			}
+			}
+			
+			/* 警報ステータス：警報発生中 */
+#ifdef swDeviEnaTime
+			if( (ecAlmSts_ActDelayCnt == gvAlmSts[ wkChannel ][ wkAlmNum ]) ||
+				(ecAlmSts_ActDevTime == gvAlmSts[ wkChannel ][ wkAlmNum ]) )
+#else
+			if( ecAlmSts_ActDelayCnt == gvAlmSts[ wkChannel ][ wkAlmNum ] )
+#endif
+			{
+				/* 計測値が逸脱値を下回ったとき or 逸脱許可無効 or イベントキーOFF状態 */
+				if( wkReleaseAlmFlg == imON )
+				{
+#ifndef swDeviEnaTime
+					gvMeasPrm.mDevFlg[ wkChannel ] &= ~wkBit;								/* 現在の測定値逸脱フラグをOFF */
+					gvMeasPrm.mAlmFlg[ wkChannel ] &= ~wkBit;								/* 現在の測定値警報フラグをOFF */
+					
+					/* 計測警報履歴セット準備 */
+					SubAlarm_HistSet( imOFF, wkAlmNum, ecMeasAlmItm_MeasAlmDelayCnt );
+					SubAlarm_HistSet( imOFF, wkAlmNum, ecMeasAlmItm_MeasDev );
+					
+					/* 警報解除(遅延回数経過)を計測警報領域にライト */
+					gvMeasAlmNum ++;														/* 計測警報発生/解除回数インクリメント */
+					
+					/* 逸脱解除を計測警報領域にライト */
+					gvMeasAlmNum ++;														/* 計測警報発生/解除回数インクリメント */
+					wkHsMeasAlmFlg = imON;
+					
+					/* 通常測定での警報処理(Eventキーでの測定以外) or イベントキーOFF */
+					if( (gvModuleSts.mEventKey != ecEventKeyModuleSts_Alm) ||
+						(gvInFlash.mParam.mEventKeyFlg == imOFF) )
+					{
+						stAlmSts.mDelayCnt[ wkAlmNum ][ wkChannel ] = 0U;					/* 遅延回数クリア */
+						gvAlmSts[ wkChannel ][ wkAlmNum ] = ecAlmSts_Non;					/* 警報ステータス：未発生に更新 */
+					}
+					
+					/* 過去警報フラグ */
+					if( gvInFlash.mData.mAlmPast[ wkChannel ] == ecAlmPastSts_Pre )
+					{
+						gvInFlash.mData.mAlmPast[ wkChannel ] = ecAlmPastSts_Set;			/* 過去警報フラグ発生 */
+					}
+#else
+					/* 逸脱許容時間ステータス：許容時間完了なら状態継続(但し、イベントステータスON状態) */
+					if( (stAlmSts.mDevEnaSts[ wkAlmNum ] == ecDevEnaSts_Fin) &&
+						(gvInFlash.mParam.mEventKeyFlg == imON) )
+					{
+						;																	/* 無処理 */
+					}
+					else
+					{
+						gvMeasPrm.mDevFlg[ wkChannel ] &= ~wkBit;							/* 現在の測定値逸脱フラグをOFF */
+						gvMeasPrm.mAlmFlg[ wkChannel ] &= wkBit;							/* 現在の測定値警報フラグをON */
+						/* 警報解除を計測警報領域にライト */
+						ApiFlash_WriteMeasAlm( imOFF, wkChannel, wkAlmNum, gvMeasPrm.mMeasVal[ wkChannel ], ecMeasAlmItm_MeasAlmDelayCnt );
+						
+						/* 逸脱解除を計測警報領域にライト */
+						ApiFlash_WriteMeasAlm( imOFF, wkChannel, wkAlmNum, gvMeasPrm.mMeasVal[ wkChannel ], ecMeasAlmItm_MeasDev );
+						
+						/* 通常測定での警報処理(Eventキーでの測定以外) or イベントキーOFF */
+						if( (gvModuleSts.mEventKey != ecEventKeyModuleSts_Alm) ||
+							(gvInFlash.mParam.mEventKeyFlg == imOFF) )
+						{
+							if( gvModuleSts.mEventKey != ecEventKeyModuleSts_Alm )
+							{
+								;
+							}
+							else
+							{
+								stAlmSts.mDevEnaSts[ wkAlmNum ] = ecDevEnaSts_Non;			/* 逸脱許容時間ステータス：初期に更新 */
+								stAlmSts.mDevEnaCnt[ wkAlmNum ] = 0U;						/* 逸脱許容時間カウンタ：0クリア */
+							}
+							stAlmSts.mDelayCnt[ wkAlmNum ][ wkChannel ] = 0U;				/* 遅延回数クリア */
+							
+							gvAlmSts[ wkChannel ][ wkAlmNum ] = ecAlmSts_Non;				/* 警報ステータス：未発生に更新 */
+						}
+					}
+#endif
+				}
+				/* 計測値が逸脱値を上回ったとき */
+				else
+				{
+					;
+				}
+			}
+		}
+		
+		SubAlarm_Hist( wkChannel );															/* 計測警報履歴記録 */
+	}
+	
+	/* 計測周期1の警報監視 */
+	if( gvModuleSts.mExe == ecExeModuleSts_Alm1 )
+	{
+		vMeasAlmLog2Flg = imOFF;
+	}
+	/* 計測周期2、イベントキーの警報監視 */
+	else
+	{
+		vMeasAlmLog2Flg = imON;
+		
+		/* 警報発生/解除あり */
+		if( gvMeasAlmNum > 0U || wkHsMeasAlmFlg == imON )
+		{
+			gvHsMeasAlmFlg = imON;
+			SubAlarm_MeasAlm2DataSet();														/* 周期2、キー操作による長距離送信用データ生成 */
+		}
+	}
+	
+#ifdef swDeviEnaTime
+	/* 通常測定での警報処理(Eventキーでの測定以外) */
+	if( gvModuleSts.mEventKey != ecEventKeyModuleSts_Alm )
+		{
+		stAlmSts.mLastTime = gvMeasPrm.mTime;												/* 時刻を保存 */
+	}
+	
+	if( gvAlmClrPoint & (imAlmClrPoint_Time | imAlmClrPoint_FlgCng) )
+	{
+		gvAlmClrPoint = 0U;																	/* 警報逸脱クリア契機初期化 */
+	}
+#endif
+}
+
+
+/*
+ *******************************************************************************
+ * 計測警報発生/解除更新
+ *
+ *	[内容]
+ *		計測警報履歴記録用に、計測警報発生/解除の情報を更新する
+ *		引数で与えられた情報をもとに、テーブルを参照しvHistAlmStsのフラグをONする
+ *	[引数]
+ *		uint8_t	arOnOffFlg：	imON:警報発生、imOFF:警報解除
+ *		uint8_t	arAlmNum:		警報種類(上上下/上限/下限/下下限)
+ *		ET_MeasAlmItm_t	arSts:	警報項目(逸脱、警報など)
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+static void SubAlarm_HistSet( uint8_t arOnOffFlg, uint8_t arAlmNum, ET_MeasAlmItm_t arSts )
+{
+	uint8_t wkLoop;
+	
+	for( wkLoop = 0U ; wkLoop < 16U ; wkLoop ++ )
+	{
+		/* 与えられた変数と一致するテーブルのbitを1にする */
+		if( (arAlmNum == cHistAlmSetTbl[ wkLoop ].mAlmNum) &&
+			(arSts == cHistAlmSetTbl[ wkLoop ].mAlmItm) &&
+			(arOnOffFlg == cHistAlmSetTbl[ wkLoop ].mOnOffFlg) )
+		{
+			vHistAlmSts |= cHistAlmSetTbl[ wkLoop ].mAlmSts;
+			break;
+		}
+	}
+}
+
+
+/*
+ *******************************************************************************
+ * 計測警報履歴記録
+ *
+ *	[内容]
+ *		vHistAlmStsのフラグをもとに計測警報履歴を発生/解除をソートし、履歴記録する
+ *	[引数]
+ *		uint8_t	arCh：	チャンネル
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+static void SubAlarm_Hist( uint8_t arCh )
+{
+	ST_HistSort_t	wkSort[ 10U ];
+	uint16_t		wkDelayCntOn;
+	uint16_t		wkDevOff;
+	uint16_t		wkDelayCntOff;
+	uint8_t			wkIndex;
+	uint8_t			wkLoop;
+	uint32_t		wkHistTime;
+	
+	
+	/* 上上限警報発生、上上限逸脱発生、上限警報発生、上限逸脱発生、下限逸脱解除、下限警報解除、下下限逸脱解除、下下限警報解除 */
+	if( vHistAlmSts & (HHDelayCntOn | HHDevOn | HDelayCntOn | HDevOn | LDevOff | LDelayCntOff | LLDevOff | LLDelayCntOff) )
+	{
+		wkDelayCntOn = HDelayCntOn;
+		wkDevOff = LLDevOff;
+		wkDelayCntOff = LLDelayCntOff;
+		wkIndex = 0U;
+	}
+	else
+	{
+		wkDelayCntOn = LDelayCntOn;
+		wkDevOff = HHDevOff;
+		wkDelayCntOff = HHDelayCntOff;
+		wkIndex = 1U;
+	}
+	
+	/* 履歴発生順にソートする */
+	for( wkLoop = 0U ; wkLoop < 10U ; wkLoop++ )
+	{
+		if( vHistAlmSts & wkDelayCntOn )
+		{
+			if( wkLoop <= 1U )
+			{
+				wkSort[ wkLoop ] = cHistAlmSortTbl_Add2[ wkIndex ][ wkLoop ];
+			}
+			else
+			{
+				wkSort[ wkLoop ] = cHistAlmSortTbl[ wkIndex ][ wkLoop - 2U ];
+			}
+		}
+		else if( vHistAlmSts & (wkDevOff | wkDelayCntOff) )
+		{
+			if( wkLoop <= 1U )
+			{
+				wkSort[ wkLoop ] = cHistAlmSortTbl[ wkIndex ][ wkLoop ];
+			}
+			else if( wkLoop == 2U )
+			{
+				wkSort[ wkLoop ] = cHistAlmSortTbl_Add1[ wkIndex ];
+			}
+			else
+			{
+				wkSort[ wkLoop ] = cHistAlmSortTbl[ wkIndex ][ wkLoop - 1U ];
+			}
+		}
+		else
+		{
+			wkSort[ wkLoop ] = cHistAlmSortTbl[ wkIndex ][ wkLoop ];
+		}
+	}
+	
+	if( gvModuleSts.mEventKey != ecEventKeyModuleSts_Alm )
+	{
+		wkHistTime = gvMeasPrm.mTime;
+	}
+	else
+	{
+		wkHistTime = gvMeasPrm.mTimeEvt;
+	}
+
+	/* ソートされた順にFlashに履歴をライトする */
+	for( wkLoop = 0 ; wkLoop < 10U ; wkLoop++ )
+	{
+		if( vHistAlmSts & wkSort[ wkLoop ].mAlmSts )
+		{
+			ApiFlash_WriteMeasAlm( wkHistTime, wkSort[ wkLoop ].mOnOffFlg, arCh, wkSort[ wkLoop ].mAlmNum, gvMeasPrm.mMeasVal[ arCh ], wkSort[ wkLoop ].mAlmItm );
+		}
+	}
+}
+
+#if 0
+/*
+ *******************************************************************************
+ * 計測警報発生/解除回数クリア
+ *
+ *	[内容]
+ *		計測警報発生/解除回数をクリアする
+ *	[引数]
+ *		なし
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+void ApiAlarm_ReadMeasAlmNumClr( void )
+	{
+	gvMeasAlmNum = 0U;
+}
+#endif
+
+/*
+ *******************************************************************************
+ * 収録周期1、周期2のどちらで発生したかを示すフラグを返す
+ *
+ *	[内容]
+ *		収録周期1、周期2のどちらで発生したかを示すフラグを返す
+ *	[引数]
+ *		なし
+ *	[戻値]
+ *		uint8_t vMeasAlmLog2Flg: 収録周期1、周期2のどちらで発生したかを示すフラグ
+ *******************************************************************************
+ */
+uint8_t ApiAlarm_ReadMeasAlmFlg( void )
+{
+	return vMeasAlmLog2Flg;
+}
+
+
+/*
+ *******************************************************************************
+ * 計測警報発生/解除回数更新
+ *
+ *	[内容]
+ *		計測警報発生/解除回数を更新する
+ *	[引数]
+ *		なし
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+static void SubAlarm_MeasAlm2DataSet( void )
+{
+	uint8_t			wkLoop;
+	uint32_t		wkU32;
+	int16_t			wkS16Array[ 4U ];
+	
+	memset( &gvRfRTMeasAlm2Data, 0, sizeof(gvRfRTMeasAlm2Data) );
+	
+	/* 異常ステータス、電池残量 */
+	ApiFlash_RfRTAbnStatusSet();
+	gvRfRTMeasAlm2Data.mRTMeasData_AbnStatus = gvRfRTMeasData.mRTMeasData_AbnStatus;
+	
+	/* 最新計測値 */
+	for( wkLoop = 0U ; wkLoop < 3U ; wkLoop++ )
+	{
+		wkS16Array[ wkLoop ] = gvMeasPrm.mMeasVal[ wkLoop ];
+		if( gvInFlash.mProcess.mModelCode == ecSensType_V || gvInFlash.mProcess.mModelCode == ecSensType_Pulse )
+		{
+			wkS16Array[ wkLoop ] += imSndOffset_100;		/* 測定値を送信用にオフセット */
+		}
+		else
+		{
+			wkS16Array[ wkLoop ] += imSndOffset_2100;		/* 測定値を送信用にオフセット */
+		}
+	}
+	/* 無線用プロトコルに計測値を書き込む */
+	ApiRfDrv_SetMeaAlmValArray( &wkS16Array[ 0U ], &gvRfRTMeasAlm2Data.mRTMeasData_MeasVal[ 0U ] );
+	
+	/* 最新データ時刻 */
+	for( wkLoop = 0U ; wkLoop < 4U; wkLoop++ )
+	{
+		wkU32 = gvMeasPrm.mTime >> (24U - wkLoop * 8U);
+		gvRfRTMeasAlm2Data.mRTMeasData_MeasTime[ wkLoop ] = (uint8_t)(wkU32 & 0x000000FF);
+	}
+	
+	/* 論理 */
+	gvRfRTMeasAlm2Data.mRTMeasData_MeasVal[ 4U ] &= 0x7F;
+	gvRfRTMeasAlm2Data.mRTMeasData_MeasVal[ 4U ] |= (gvMeasPrm.mLogic << 7U);
+	
+	/* 最新警報フラグ */
+	ApiFlash_RfRTAlarmFlagSet( gvMeasPrm.mAlmFlg, gvMeasPrm.mDevFlg, gvRfRTMeasAlm2Data.mRTMeasData_AlarmFlag );
+}
+
+
+#if 0
+/*
+ *******************************************************************************
+ * 逸脱許容時間カウンタを0クリアする
+ *
+ *	[内容]
+ *		逸脱許容時間カウンタを0クリアする
+ *	[引数]
+ *		なし
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+void ApiAlarm_ClrDevEnaCnt( void )
+{
+	uint8_t		wkAlmNum;
+	
+	for( wkAlmNum = 0U ; wkAlmNum < imAllAlmNum ; wkAlmNum++ )
+	{
+		stAlmSts.mDevEnaSts[ wkAlmNum ] = ecDevEnaSts_Non;
+		stAlmSts.mDevEnaCnt[ wkAlmNum ] = 0U;
+	}
+}
+#endif
+
+
+#if 0
+/*
+ *******************************************************************************
+ *	遅延回数更新処理
+ *
+ *	[内容]
+ *		チャンネル毎且つ警報数毎に遅延回数を更新する。
+ *******************************************************************************
+ */
+void ApiAlarm_DelayCntUpdate( void )
+{
+	uint8_t		wkChannelNum;													/* チャンネル数 */
+	uint8_t		wkAlmNum;														/* 警報数 */
+
+	for (wkChannelNum = 0U; wkChannelNum < imChannelNum; wkChannelNum++)
+	{
+		for (wkAlmNum = 0U; wkAlmNum < imAllAlmNum; wkAlmNum++)
+		{
+			if (stAlmSts[wkChannelNum].mAlmSts[wkAlmNum] == ecAlmSts_DelayCnt)	/* 状態が遅延回数計測中の場合 */
+			{
+				stAlmSts[wkChannelNum].mDelayCnt[wkAlmNum]++;					/* 遅延回数更新 */
+			}
+			else																/* 上記以外の場合 */
+			{
+				stAlmSts[wkChannelNum].mDelayCnt[wkAlmNum] = 0U;				/* 遅延回数初期化 */
+			}
+		}
+	}
+}
+#endif
+#pragma section

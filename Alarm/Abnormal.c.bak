@@ -1,0 +1,624 @@
+/*
+ *******************************************************************************
+ *	File name	:	Abnormal.c
+ *
+ *	[内容]
+ *		測定処理
+ *------------------------------------------------------------------------------
+ *	[変更日]		[変更者]		[概要]
+ *	2019.02.22		N.Yat			新規作成
+ *******************************************************************************
+ */
+#include "cpu_sfr.h"															/* SFR定義ヘッダー */
+
+#include "typedef.h"															/* データ型定義 */
+#include "UserMacro.h"															/* ユーザー作成マクロ定義 */
+#include "immediate.h"															/* immediate定数定義 */
+#include "switch.h"																/* コンパイルスイッチ定義 */
+#include "enum.h"																/* 列挙型の定義 */
+#include "struct.h"																/* 構造体定義 */
+#include "func.h"																/* 関数の外部参照(extern)定義 */
+#include "glLabel.h"															/* グローバル変数・定数(const)ラベル定義 */
+
+
+/*
+ *==============================================================================
+ *	define定義
+ *==============================================================================
+ */
+
+#define imROMCRCADDRESS		(*(volatile __far unsigned short *)0x17DFE)
+#define imCRCStartAdrS1		0x1C0U
+#define imCRCEndAdrS1		0xFFFU
+#define imCRCStatAdrS2		0x10CEU
+#define imCRCEndAdrS2		0x17DFDU
+
+#define	imKeyChk_ErrCnt		30U					/* キー動作異常カウンタ */
+
+/*
+ *==============================================================================
+ *	列挙型定義
+ *==============================================================================
+ */
+
+
+
+/*
+ *==============================================================================
+ *	構造体定義
+ *==============================================================================
+ */
+typedef struct ST_AbnInf
+{
+	uint8_t			mAbnNum;					/* 直近で発生した機器異常No. */
+	uint16_t		mMeasSts;					/* 測定系異常情報 */
+} ST_AbnInf_t;
+
+
+typedef struct ST_MeasAbnHist
+{
+	uint16_t			mAbnSts;
+	uint8_t				mCh;
+	ET_MeasAlmItm_t		mAlmItm;
+	ET_ErrInfItm_t		mItm;
+} ST_MeasAbnHist_t;
+
+/*
+ *==============================================================================
+ *	変数定義
+ *==============================================================================
+ */
+static ST_AbnInf_t		stAbnInf = { 0U, 0U };	/* 機器異常情報 */
+
+/*
+ *==============================================================================
+ *	定数定義
+ *==============================================================================
+ */
+const ST_MeasAbnHist_t cMeasAbnHistType[ 14U ] =
+{
+	/* mAbnSts,				mCh		mAlmItm					mItm */
+	{ imAbnSts_OvRngCh1,	0U,		ecMeasAlmItm_OvRng,		ecErrInfItm_1chOvrRng },
+	{ imAbnSts_OvRngCh2,	1U,		ecMeasAlmItm_OvRng,		ecErrInfItm_2chOvrRng },
+	{ imAbnSts_OvRngCh3,	2U,		ecMeasAlmItm_OvRng,		ecErrInfItm_3chOvrRng },
+	{ imAbnSts_UdRngCh1,	0U,		ecMeasAlmItm_UdRng,		ecErrInfItm_1chUdrRng },
+	{ imAbnSts_UdRngCh2,	1U,		ecMeasAlmItm_UdRng,		ecErrInfItm_2chUdrRng },
+	{ imAbnSts_UdRngCh3,	2U,		ecMeasAlmItm_UdRng,		ecErrInfItm_3chUdrRng },
+	{ imAbnSts_BurnCh1,		0U,		ecMeasAlmItm_Burn,		ecErrInfItm_1chBrnOut },
+	{ imAbnSts_BurnCh2,		1U,		ecMeasAlmItm_Burn,		ecErrInfItm_2chBrnOut },
+	{ imAbnSts_BurnCh3,		2U,		ecMeasAlmItm_Burn,		ecErrInfItm_3chBrnOut },
+	{ imAbnSts_ShortCh1,	0U,		ecMeasAlmItm_Short,		ecErrInfItm_1chSnsShrt },
+	{ imAbnSts_ShortCh2,	1U,		ecMeasAlmItm_Short,		ecErrInfItm_2chSnsShrt },
+	{ imAbnSts_ShortCh3,	2U,		ecMeasAlmItm_Short,		ecErrInfItm_3chSnsShrt },
+#if (swSensorCom == imEnable)
+	{ imAbnSts_SnsrComErr,	0U,		ecMeasAlmItm_Init,		ecErrInfItm_SnsComErr },
+	{ imAbnSts_SnsrErr,		0U,		ecMeasAlmItm_Init,		ecErrInfItm_SnsErr },
+#endif
+};
+
+
+/*
+ *==============================================================================
+ *	プロトタイプ宣言
+ *==============================================================================
+ */
+static void SubAbn_AbnHistSet( uint16_t arAbnSts, uint8_t arOnOff );
+static void SubAbn_MeasAbnHistSet( uint16_t arAbnSts, uint8_t arOnOff );
+
+
+#pragma section text MY_APP2
+
+/*
+ *******************************************************************************
+ * 機器異常状態取得
+ *
+ *	[内容]
+ *		機器異常状態を取得する。
+ *	[引数]
+ *		ST_AbnInfKind_t	arKind: 機器異常 or 測定系異常
+ *	[戻値]
+ *		uint16_t	stAbnInf
+ *******************************************************************************
+ */
+uint16_t ApiAbn_AbnStsGet( ST_AbnInfKind_t arKind )
+{
+	if( arKind == ecAbnInfKind_AbnSts )
+	{
+		return gvInFlash.mData.mAbnInf_Sts;
+	}
+	else
+	{
+		return stAbnInf.mMeasSts;
+	}
+}
+
+/*
+ *******************************************************************************
+ * 直近で発生した機器異常No.を取得
+ *
+ *	[内容]
+ *		直近で発生した機器異常No.を取得(Err表示の番号に使用)
+ *	[引数]
+ *		なし
+ *	[戻値]
+ *		uint8_t	stAbnInf.mAbnNum
+ *******************************************************************************
+ */
+uint8_t ApiAbn_AbnNumGet( void )
+{
+	return stAbnInf.mAbnNum;
+}
+
+/*
+ *******************************************************************************
+ * 機器異常セット
+ *
+ *	[内容]
+ *		機器異常をセットする。
+ *	[引数]
+ *		uint16_t		arAbnSts: 異常ステータス
+ *		ST_AbnInfKind_t	arKind: 機器異常 or 測定系異常
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+void ApiAbn_AbnStsSet( uint16_t arAbnSts, ST_AbnInfKind_t arKind )
+{
+	uint8_t		wkLoop;
+	uint16_t	wkSts;
+	
+	if( arKind == ecAbnInfKind_AbnSts )
+	{
+		if( !(gvInFlash.mData.mAbnInf_Sts & arAbnSts) )
+		{
+			gvInFlash.mData.mAbnInf_Sts |= arAbnSts;
+			
+			/* 直近で発生した機器異常No.をセット(電池残量低下は除く) */
+			if( arAbnSts != imAbnSts_BatLow && arAbnSts != imAbnSts_BatEmpty )
+			{
+				/* 機器異常過去警報フラグ */
+				if( gvInFlash.mData.mAlmPast[ 4U ] == ecAlmPastSts_Non )
+				{
+					gvInFlash.mData.mAlmPast[ 4U ] = ecAlmPastSts_Pre;
+				}
+				
+				for( wkLoop = 0U, wkSts = arAbnSts ; wkLoop < 16U ; wkLoop++ )
+				{
+					if( M_TSTBIT( wkSts, M_BIT0 ) )
+					{
+						stAbnInf.mAbnNum = wkLoop;
+						
+						if( gvDispMode.mNowDisp != ecDispMode_UpErrDwRtc )
+						{
+							if( gvDispMode.mNowDisp != ecDispMode_AbnChkErr )
+							{
+								gvDispMode.mPreDisp = gvDispMode.mNowDisp;
+							}
+							gvDispMode.mNowDisp = ecDispMode_AbnChkErr;
+							gvModuleSts.mLcd = ecLcdModuleSts_Run;
+						}
+						break;
+					}
+					else
+					{
+						wkSts >>= 1U;
+					}
+				}
+			}
+			
+			/* 履歴を記録する */
+			SubAbn_AbnHistSet( arAbnSts, imON );
+		}
+	}
+	else
+	{
+		if( !(stAbnInf.mMeasSts & arAbnSts) )
+		{
+			stAbnInf.mMeasSts |= arAbnSts;
+			
+			/* 機器異常過去警報フラグ */
+			if( gvInFlash.mData.mAlmPast[ 4U ] == ecAlmPastSts_Non )
+			{
+				gvInFlash.mData.mAlmPast[ 4U ] = ecAlmPastSts_Pre;
+			}
+			
+			/* 計測異常履歴を記録する */
+			SubAbn_MeasAbnHistSet( arAbnSts, imON );
+			
+		}
+	}
+	
+}
+
+
+/*
+ *******************************************************************************
+ * 機器異常クリア
+ *
+ *	[内容]
+ *		機器異常をクリアする。
+ *	[引数]
+ *		uint16_t		arAbnSts: 異常ステータス
+ *		ST_AbnInfKind_t	arKind: 機器異常 or 測定系異常
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+void ApiAbn_AbnStsClr( uint16_t arAbnSts, ST_AbnInfKind_t arKind )
+{
+	if( arKind == ecAbnInfKind_AbnSts )
+	{
+		if( gvInFlash.mData.mAbnInf_Sts & arAbnSts )
+		{
+			gvInFlash.mData.mAbnInf_Sts &= ~arAbnSts;
+			
+			/* 機器異常過去警報フラグ */
+			if( gvInFlash.mData.mAlmPast[ 4U ] == ecAlmPastSts_Pre )
+			{
+				gvInFlash.mData.mAlmPast[ 4U ] = ecAlmPastSts_Set;
+			}
+			/* 履歴を記録する */
+			SubAbn_AbnHistSet( arAbnSts, imOFF );
+			
+		}
+	}
+	else
+	{
+		if( stAbnInf.mMeasSts & arAbnSts )
+		{
+			stAbnInf.mMeasSts &= ~arAbnSts;
+			
+			/* 機器異常過去警報フラグ */
+			if( gvInFlash.mData.mAlmPast[ 4U ] == ecAlmPastSts_Pre )
+			{
+				gvInFlash.mData.mAlmPast[ 4U ] = ecAlmPastSts_Set;
+			}
+			/* 計測異常履歴を記録する */
+			SubAbn_MeasAbnHistSet( arAbnSts, imOFF );
+	
+		}
+	}
+}
+
+
+/*
+ *******************************************************************************
+ * 異常履歴を記録する
+ *
+ *	[内容]
+ *		異常履歴を記録する
+ *	[引数]
+ *		uint16_t		arAbnSts: 異常ステータス
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+static void SubAbn_AbnHistSet( uint16_t arAbnSts, uint8_t arOnOff )
+{
+	ET_ErrInfItm_t wkItm;
+	
+	switch( arAbnSts )
+	{
+		/* 電池残量空 */
+		case imAbnSts_BatEmpty:
+			wkItm = ecErrInfItm_BatEmpty;
+			if( arOnOff == imOFF )
+			{
+				ApiFlash_WriteActLog( ecActLogItm_BattIn, 0U, 4U );				/* 操作履歴：電池交換 */
+			}
+			break;
+		/* 無線IC異常 */
+		case imAbnSts_RF:
+			return;
+		/* プライマリFlashメモリ異常 */
+		case imAbnSts_PMEM:
+			wkItm = ecErrInfItm_PrimMemErr;
+			break;
+		/* セカンダリFlashメモリ異常 */
+		case imAbnSts_SMEM:
+			wkItm = ecErrInfItm_SecondMemErr;
+			break;
+		/* マイコンROM異常 */
+		case imAbnSts_ROM:
+			wkItm = ecErrInfItm_MiComRomErr;
+			break;
+		/* debug */
+		case imAbnSts_Dummy3:
+			return;
+		/* 発振子異常 */
+		case imAbnSts_CLK:
+			wkItm = ecErrInfItm_ClkErr;
+			break;
+		/* キー異常 */
+		case imAbnSts_KEY:
+			wkItm = ecErrInfItm_KeyBehErr;
+			break;
+		/* 外付けRTC異常 */
+		case imAbnSts_RTC:
+			wkItm = ecErrInfItm_ExRtcErr;
+			break;
+		/* 内蔵Flash異常 */
+		case imAbnSts_INFLSH:
+			return;
+		/* 内蔵RTC異常 */
+		case imAbnSts_INRTC:
+			wkItm = ecErrInfItm_InRtcErr;
+			break;
+		/* 電池残量低下 */
+		case imAbnSts_BatLow:
+			if( arOnOff == imOFF )
+			{
+				return;
+			}
+			wkItm = ecErrInfItm_BatLow;
+			break;
+		default:
+			return;
+	}
+	
+	ApiFlash_WriteErrInfo( wkItm, arOnOff );
+}
+
+/*
+ *******************************************************************************
+ * 計測異常履歴を記録する
+ *
+ *	[内容]
+ *		計測異常履歴を記録する
+ *	[引数]
+ *		uint16_t		arAbnSts: 異常ステータス
+ *		uint8_t			arOnOFF: 解除/発生
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+static void SubAbn_MeasAbnHistSet( uint16_t arAbnSts, uint8_t arOnOff )
+{
+	uint8_t wkLoop;
+	uint32_t wkHistTime;
+	
+	for( wkLoop = 0U ; wkLoop < M_ArrayElement(cMeasAbnHistType) ; wkLoop++ )
+	{
+		if( arAbnSts == cMeasAbnHistType[ wkLoop ].mAbnSts )
+		{
+			break;
+		}
+	}
+	if( wkLoop < M_ArrayElement(cMeasAbnHistType) )
+	{
+		/* 機器異常履歴 */
+		ApiFlash_WriteErrInfo( cMeasAbnHistType[ wkLoop ].mItm, arOnOff );
+		
+		/* 計測警報履歴 */
+		if( cMeasAbnHistType[ wkLoop ].mAlmItm != ecMeasAlmItm_Init )
+		{
+			if( gvModuleSts.mEventKey == ecEventKeyModuleSts_Meas )
+			{
+				wkHistTime = gvMeasPrm.mTimeEvt;			/* 時刻情報(イベント実行時) */
+			}
+			else
+			{
+				wkHistTime = gvMeasPrm.mTime;				/* 時刻情報 */
+			}
+			ApiFlash_WriteMeasAlm( wkHistTime, arOnOff, cMeasAbnHistType[ wkLoop ].mCh, 0U, gvMeasPrm.mMeasVal[ cMeasAbnHistType[ wkLoop ].mCh ], cMeasAbnHistType[ wkLoop ].mAlmItm );
+		}
+		
+		gvMeasAlmNum ++;									/* 計測警報発生/解除回数インクリメント */
+	}
+//	gvHsMeasAlmFlg = imON;
+}
+
+
+/*
+ *******************************************************************************
+ * ハードエラーの確認
+ *
+ *	[内容]
+ *		ハードエラーの確認する。
+ *	[引数]
+ *		なし
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+void ApiAbn_Chk( void )
+{
+	uint8_t			wkLoop;
+	uint8_t	wkRet;
+	uint32_t		wkTau0Ch1Cnt;
+	
+	static uint8_t	vKeyCnt[ 3U ] = { 0U, 0U, 0U };
+	static uint8_t	vClkNgCnt = 0U;
+	
+	/* キー動作確認 */
+	if( gvModuleSts.mErrChk & imErrChk_KeyChk )
+	{
+		wkRet = imOFF;
+		
+		if( KEY_EVENT == imHigh )
+		{
+			vKeyCnt[ 0U ] ++;
+		}
+		else
+		{
+			vKeyCnt[ 0U ] = 0U;
+		}
+		
+		if( KEY_DISP == imHigh )
+		{
+			vKeyCnt[ 1U ] ++;
+		}
+		else
+		{
+			vKeyCnt[ 1U ] = 0U;
+		}
+		
+		if( KEY_RESET == imHigh )
+		{
+			vKeyCnt[ 2U ] ++;
+		}
+		else
+		{
+			vKeyCnt[ 2U ] = 0U;
+		}
+		
+		for( wkLoop = 0U ; wkLoop < 3U ; wkLoop++ )
+		{
+			/* 30回連続(30min)でON状態 */
+			if( vKeyCnt[ wkLoop ] > imKeyChk_ErrCnt )
+			{
+				wkRet = imON;
+			}
+		}
+		
+		/* キー連続ON */
+		if( wkRet == imON )
+		{
+			/* キー異常発生 */
+			ApiAbn_AbnStsSet( imAbnSts_KEY, ecAbnInfKind_AbnSts );
+		}
+#if 0	/* 機器異常復帰させない */
+		else
+		{
+			/* キー異常解除 */
+			ApiAbn_AbnStsClr( imAbnSts_KEY, ecAbnInfKind_AbnSts );
+	}
+#endif
+		gvModuleSts.mErrChk &= ~imErrChk_KeyChk;
+	}
+	
+	/* 発振子動作確認 */
+	if( gvModuleSts.mErrChk & imErrChk_CycChk )
+	{
+		wkTau0Ch1Cnt = ApiTau0_GetTau0Ch1Cnt();						/* タイマ0チャネル1のカウンタを取得 */
+		
+		/* 発振が範囲外 */
+		if( wkTau0Ch1Cnt < 724 || wkTau0Ch1Cnt > 739 )
+		{
+			vClkNgCnt ++;
+			/* 10回連続測定 */
+			if( vClkNgCnt > 10U )
+			{
+				/* 発振子異常発生 */
+				ApiAbn_AbnStsSet( imAbnSts_CLK, ecAbnInfKind_AbnSts );
+			}
+		}
+		else
+		{
+			vClkNgCnt = 0U;
+			
+#if 0	/* 機器異常復帰させない */
+			/* 発振子異常解除 */
+			ApiAbn_AbnStsClr( imAbnSts_CLK, ecAbnInfKind_AbnSts );
+#endif
+		}
+		gvModuleSts.mErrChk &= ~imErrChk_CycChk;
+	}
+}
+
+
+/*
+ *******************************************************************************
+ * Err表示用の番号セット
+ *
+ *	[内容]
+ *		Err表示用の番号セットし、表示遷移
+ *		電池空:bit0、電池残量低下:bit12を除く
+ *	[引数]
+ *		なし
+ *	[戻値]
+ *		なし
+ *******************************************************************************
+ */
+void ApiAbn_AbnNumSet( void )
+{
+	uint8_t		wkLoop;
+	uint16_t	wkBit;
+	
+	
+	if( gvInFlash.mData.mAbnInf_Sts & 0x0FFE )
+	{
+		for( wkLoop = 0U, wkBit = 1U ; wkLoop < 16U ; wkLoop++, wkBit <<= 1U )
+		{
+			if( gvInFlash.mData.mAbnInf_Sts & wkBit )
+			{
+				/* 電池空:bit0、電池残量低下:bit12を除く */
+				if( wkBit != M_BIT0 && wkBit != M_BIT12 )
+				{
+					/* Err番号セット */
+					stAbnInf.mAbnNum = wkLoop;
+					
+					/* 表示更新 */
+					if( gvDispMode.mNowDisp != ecDispMode_UpErrDwRtc )
+					{
+						if( gvDispMode.mNowDisp != ecDispMode_AbnChkErr )
+						{
+							gvDispMode.mPreDisp = gvDispMode.mNowDisp;
+						}
+						gvDispMode.mNowDisp = ecDispMode_AbnChkErr;
+						gvModuleSts.mLcd = ecLcdModuleSts_Run;
+					}
+					break;
+				}
+			}
+		}
+	}
+}
+#pragma section
+
+
+#pragma section text MY_APP
+/*
+ *******************************************************************************
+ *	ROM CRC演算処理
+ *
+ *	[内容]
+ *		ROM CRC演算処理
+ *******************************************************************************
+ */
+void ApiAbn_ChkCRC( void )
+{
+	uint8_t __far* __far	wkAdr;
+	uint32_t				wkAddr;
+	uint8_t					wkVal;
+	uint16_t				wkRomCrc;
+	
+	wkRomCrc = imROMCRCADDRESS;
+	
+	CRCD = 0x0000U;
+	
+	/* プログラム領域1 */
+	for( wkAddr = imCRCStartAdrS1 ; wkAddr <= imCRCEndAdrS1 ; wkAddr++ )
+	{
+		wkAdr = (uint8_t __far*)wkAddr;
+		
+		wkVal = (uint8_t)*wkAdr;
+		CRCIN = wkVal;
+		NOP();
+	}
+	
+	/* プログラム領域2 */
+	for( wkAddr = imCRCStatAdrS2 ; wkAddr <= imCRCEndAdrS2 ; wkAddr++ )
+	{
+		wkAdr = (uint8_t __far*)wkAddr;
+		
+		wkVal = (uint8_t)*wkAdr;
+		CRCIN = wkVal;
+		NOP();
+	}
+	
+	if( wkRomCrc != CRCD )
+	{
+		/* マイコンROM異常発生 */
+		ApiAbn_AbnStsSet( imAbnSts_ROM, ecAbnInfKind_AbnSts );
+	}
+#if 0	/* 機器異常復帰させない */
+	else
+	{
+		/* マイコンROM異常解除 */
+		ApiAbn_AbnStsClr( imAbnSts_ROM, ecAbnInfKind_AbnSts );
+	}
+#endif
+}
+#pragma section
+

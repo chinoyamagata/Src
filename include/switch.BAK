@@ -1,0 +1,41 @@
+/*
+ *******************************************************************************
+ *	File name	:	switch.h
+ *
+ *	[内容]
+ *		コンパイルスイッチ定義
+ *------------------------------------------------------------------------------
+ *	[変更日]		[変更者]		[概要]
+ *	2017.11.08		Softex N.I		新規作成
+ *******************************************************************************
+ */
+#ifndef	INCLUDED_SWITCH_H
+#define	INCLUDED_SWITCH_H
+
+#define swDebugLcd			imDisable		/* LCD点灯確認（許可:imEnable/禁止:imDisable） */
+
+#define	swTmpCntUartOut		imDisable		/* 測定のカウント値をUART出力する */
+
+#define	swLoggerBord		imEnable		/* 無線処理切り替え、imEnable：Logger、imDisable：GW */
+
+#define swRfTxTest			imDisable
+
+#define swRfTestLcd			imDisable		/* 無線通信タイミングDebug、タイミング補正用温度値表示 */
+
+#define swRfRxTest			imDisable
+
+#define	swRfPortDebug		imDisable		/* 無線時にポート出力:デバッグ用 */
+
+#define swRssiLogDebug		imEnable		/* 上段にGWID、下段にRSSI表示、CH2にRSSI、CH3にGWID収録 */
+
+#define swRESFDisp			imDisable		/* リセット原因RESFを表示 */
+
+#define swKouteiMode		imDisable		/* 工程用の機能 */
+
+#define swRfOffMode 		imEnable		/* RF OFFモードでの高速通信有効無効 Enableで無効(つまり全OFF) */
+
+#define swAdCntLog			imDisable		/* 収録1chに無線時のADカウント値を収録 */
+
+#define swSensorCom			imEnable		/* センサ間通信 */
+
+#endif
